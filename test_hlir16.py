@@ -1,18 +1,19 @@
 #!/usr/bin/env python
 
 # Copyright 2017 Eotvos Lorand University, Budapest, Hungary
-# 
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
-# 
+#
 #     http://www.apache.org/licenses/LICENSE-2.0
-# 
+#
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 
 from __future__ import print_function
 import pprint
@@ -28,18 +29,20 @@ def indentprint(data):
 def load_p4_using_args():
     import sys
 
-    if len(sys.argv) <= 2:
+    if len(sys.argv) <= 1:
         print("TODO usage")
         sys.exit()
 
-    p4c_path = sys.argv[1]
-    p4c_file = sys.argv[2]
+    p4c_file = sys.argv[1]
+    p4v      = int(sys.argv[2]) if len(sys.argv) > 2 else 16
+    p4c_path = sys.argv[3] if len(sys.argv) > 3 else None
 
-    (errcode, program, nodes) = hlir16.load_p4(p4c_path, p4c_file)
+    program = hlir16.load_p4(p4c_file, p4v, p4c_path)
 
-    if program is None:
-        print("TODO error message", errcode)
-        sys.exit(errcode)
+    # If we got an int, it's an error code.
+    if type(program) is int:
+        print("TODO error message", program)
+        sys.exit(program)
 
     return program
 
@@ -74,6 +77,10 @@ print(program.xdir())
 
 print("-----------------------")
 
+print(program.declarations)
+
+print("-----------------------")
+
 print(program.declarations.xdir())
 print(program.declarations.is_vec())
 print(len(program.declarations))
@@ -92,8 +99,7 @@ for decl in program.declarations['Type_Control']:
         print(decl.name, e.direction, e.type.path, e.type.path.name, e.type.path.absolute, e.name, e.id)
 
 # Note: it is also possible to set custom attributes
-program.set_attrs({'controls': program.declarations['Type_Control']})
+program.add_attrs({'controls': program.declarations['Type_Control']})
 
 print(len(program.controls))
-print(program.controls[0].applyParams.parameters[2].name)
-
+print(program.controls[0].applyParams.parameters[0].name)
