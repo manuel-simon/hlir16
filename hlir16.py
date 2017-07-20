@@ -305,24 +305,28 @@ def set_additional_attrs(hlir16, nodes, p4_version):
             })
         table.remove_attr('properties')
 
-        if table.get_attr('key'):
+        if table.get_attr('key') is not None:
             table.add_attrs({
                 'match_field_names':
                     # TODO probably needs improvement
                     [(str(key.expression.expr.member), str(key.expression.member)) for key in table.key.keyElements if key.expression.expr.get_attr('member')],
-                'match_hdr':
-                    [hlir16.headers.fields],
+                #'match_hdr':
+                #    [hlir16.headers.fields],
             })
 
-        if table.get_attr('match_field_names'):
+        if table.get_attr('match_field_names') is not None:
             table.add_attrs({
                 'match_type':
                     # TODO more complex than this
-                    table.key.keyElements[0].matchType.path.name,
+                    table.key.keyElements[0].matchType.path.name.upper(),
                 'key_length':
-                    sum([hlir16.declarations.get(hlir16.headers.fields.get(header_var_name).type.path.name, 'Type_Header').fields.get(field_name).type.size
-                            for header_var_name, field_name in table.match_field_names
-                            if hlir16.headers.fields.get(header_var_name) is not None]),
+                    (sum([hlir16.declarations.get(hlir16.headers.get(header_var_name).type.path.name, 'Type_Header').fields.get(field_name).type.size
+                        for header_var_name, field_name in table.match_field_names
+                        if hlir16.headers.get(header_var_name) is not None]) +
+                        sum([hlir16.declarations.get(hlir16.declarations.get('metadata', 'Type_Struct').fields.get(header_var_name).type.path.name, 'Type_Struct').fields.get(field_name).type.size
+                           for header_var_name, field_name in table.match_field_names
+                           if hlir16.declarations.get('metadata', 'Type_Struct').fields.get(header_var_name) is not None])
+                     +7)/8
             })
         else:
             # TODO is this OK?
