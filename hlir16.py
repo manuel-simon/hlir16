@@ -28,7 +28,7 @@ def has_method(obj, method_name):
     return hasattr(obj, method_name) and callable(getattr(obj, method_name))
 
 
-def walk_json(node, fun, nodes, skip_elems=['Node_Type', 'Node_ID'], node_parent_chain=[]):
+def walk_json(node, fun, nodes, skip_elems=['Node_Type', 'Node_ID', 'Source_Info'], node_parent_chain=[]):
     rets = []
     if type(node) is dict or type(node) is list:
         node_id = node['Node_ID']
@@ -196,6 +196,10 @@ def paths_to(node, value, max_depth=20, path=[], root=None, max_length=70, print
 
 
 def set_additional_attrs(hlir16, nodes, p4_version):
+
+    # --------------------------------------------------------------------------
+    # Common
+
     hlir16.add_common_attrs({
         "all_nodes":
             nodes,
@@ -216,53 +220,38 @@ def set_additional_attrs(hlir16, nodes, p4_version):
                 (lambda n: lambda typename: P4Node({}, [f for f in hlir16.declarations if f.node_type == typename or f.node_type == 'Type_' + typename]))(node),
         })
 
+    # --------------------------------------------------------------------------
+    # Structs
+
     for struct in hlir16.declarations['Type_Struct']:
         hlir16.add_attrs({
-            struct.name:
-                struct,
+            struct.name: struct
         })
 
-
+    # --------------------------------------------------------------------------
+    # Metadatas and metadata types
 
     if hlir16.p4v == 14:
-        hlir16.add_attrs({
-            'metadatas':
-                P4Node({}, [hlir16.standard_metadata_t] + [hlir16.declarations.get(meta.type.path.name, 'Type_Struct') for meta in hlir16.declarations.get('metadata', 'Type_Struct').fields]),
-        })
-        metadata_inst_names = ['standard_metadata'] + [meta.annotations.annotations.get('name', 'Annotation').expr[0].value for meta in hlir16.declarations.get('metadata', 'Type_Struct').fields]
-        for meta, inst_name in zip(hlir16.metadatas, metadata_inst_names):
-            meta.add_attrs({'inst_name': inst_name})
+        hlir16.metadatas = hlir16.declarations.get('metadata', 'Type_Struct').fields
+        hlir16.metadata_types = P4Node({}, [hlir16.standard_metadata_t] +
+                                           [hlir16.declarations.get(meta.type.path.name, 'Type_Struct') for meta in hlir16.metadatas])
+        metadata_inst_names = ['standard_metadata'] + [meta.annotations.annotations.get('name', 'Annotation').expr[0].value for meta in hlir16.metadatas]
+        for meta, name in zip(hlir16.metadata_types, metadata_inst_names):
+            meta.inst_name = name
     else:
         hlir16.add_attrs({
-            'metadatas': [], # TODO
+            'metadata_types': [], 'metadatas': [], # TODO
         })
+
+    # --------------------------------------------------------------------------
+    # Headers and header types
+
+    hlir16.header_types = hlir16.declarations['Type_Header']
 
     if hlir16.p4v == 14:
-        hlir16.add_attrs({
-            'headers':
-                hlir16.declarations.get("headers", "Type_Struct").fields,
-        })
-    else:
-        hlir16.add_attrs({
-            'headers': [], # TODO
-        })
-
-    hlir16.add_attrs({
-        'controls':
-            hlir16.declarations['Type_Control'],
-        'tables':
-            [t for ctrl in hlir16.declarations['P4Control']
-                for t in ctrl.controlLocals['P4Table']],
-        'header_types':
-            hlir16.declarations['Type_Header'],
-    })
-
-    if p4_version == 16:
-        header_instances = hlir16.Parsed_packet.fields['StructField']
-    elif p4_version == 14:
-        header_instances = hlir16.declarations.get('headers', 'Type_Struct').fields['StructField']
-
-    hlir16.add_attrs({'header_instances': header_instances})
+        hlir16.headers = hlir16.declarations.get("headers", "Type_Struct").fields #['StructField']
+    elif hlir16.p4v == 16:
+        hlir16.headers = hlir16.Parsed_packet.fields #['StructField']
 
     def add_offsets_to_header(header_type):
         offset = 0
@@ -273,25 +262,46 @@ def set_additional_attrs(hlir16, nodes, p4_version):
                 size = get_type(hlir16, fld).size / 8
             offset += size
 
-    for hdr in hlir16.header_instances:
-        hdr.add_attrs({
-            'header_type':
-                hlir16.declarations.get(hdr.type.path.name, "Type_Header"),
-            'bit_offset':
-                'TODO',
-            'byte_offset':
-                'TODO',
-            'mask':
-                'TODO',
-        })
-
+    for hdr in hlir16.headers:
+        # TODO bit_offset, byte_offset, mask
+        hdr.header_type = hlir16.declarations.get(hdr.type.path.name, "Type_Header")
         add_offsets_to_header(hdr.header_type)
 
     # TODO standard_metadata_t is not accessible in P4-16?
     if hlir16.get_attr('standard_metadata_t') is not None:
-        for meta in hlir16.metadatas:
+        for meta in hlir16.metadata_types:
             add_offsets_to_header(meta)
 
+    # --------------------------------------------------------------------------
+    # Controls and tables
+
+    hlir16.control_types = hlir16.declarations['Type_Control']
+    hlir16.controls = hlir16.declarations['P4Control']
+
+    for c in hlir16.declarations['P4Control']:
+        c.tables = c.controlLocals['P4Table']
+        for t in c.tables:
+            t.control = c
+        c.actions = c.controlLocals['P4Action']
+
+    hlir16.tables = [t for c in hlir16.controls for t in c.tables]
+
+    for table in hlir16.tables:
+        for prop in table.properties.properties:
+            table.add_attrs({
+                prop.name: prop.value,
+            })
+        table.remove_attr('properties')
+
+    for c in hlir16.controls:
+        for t in c.tables:
+            table_actions = []
+            for a in t.actions.actionList:
+                a.action_object = c.controlLocals.get(a.expression.method.path.name, 'P4Action')
+                table_actions.append(a)
+            t.actions = table_actions
+
+    # TODO this shall be calculated in the HAL
     def match_type(table):
         lpm = 0
         ternary = 0
@@ -301,58 +311,42 @@ def set_additional_attrs(hlir16, nodes, p4_version):
                 ternary = 1
             elif mt == 'lpm':
                 lpm += 1
-        if ternary or lpm > 1:
-            return 'TERNARY'
-        elif lpm:
-            return 'LPM'
-        else:
-            return 'EXACT'
+        if ternary or lpm > 1: return 'TERNARY'
+        elif lpm:              return 'LPM'
+        else:                  return 'EXACT'
+
+    # some tables do not have a key (e.g. 'tbl_act*'), we do not want to deal with them for now
+    hlir16.tables[:] = [table for table in hlir16.tables if hasattr(table, 'key')]
 
     for table in hlir16.tables:
-        # Note: turning the properties into proper properties of the table
-        for prop in table.properties.properties:
-            table.add_attrs({
-                prop.name: prop.value,
-            })
-        table.remove_attr('properties')
-
-        table.add_attrs({ 'match_type': match_type(table) })
-
+        table.match_type = match_type(table)
         key_length = 0
         for k in table.key.keyElements:
-            # supposing that k.expression is of the form 'hdr.<header_name>.<name>
-            k.add_attrs({'header_name': k.expression.expr.member,
-                         'field_name':  k.expression.member,
-                         'match_type':  k.matchType.path.name,
-                        })
-            k.add_attrs({'id': 'field_instance_' + k.header_name + '_' + k.field_name})
+            # supposing that k.expression is of form '<header_name>.<name>'
+            if k.expression.expr.node_type == 'PathExpression':
+                k.header_name = k.expression.expr.path.name
+                k.field_name = k.expression.member
+            # supposing that k.expression is of form 'hdr.<header_name>.<name>'
+            elif k.expression.expr.node_type == 'Member':
+                k.header_name = k.expression.expr.member
+                k.field_name = k.expression.member
+            k.match_type = k.matchType.path.name
+            k.id = 'field_instance_' + k.header_name + '_' + k.field_name
             if hlir16.headers.get(k.header_name) is not None:
                 k.header = hlir16.headers.get(k.header_name)
-                k.header_type = hlir16.declarations.get(k.header.type.path.name, 'Type_Header')
-            elif hlir16.declarations.get('metadata', 'Type_Struct').fields.get(k.header_name) is not None:
-                k.header = hlir16.declarations.get('metadata', 'Type_Struct').fields.get(k.header_name)
-                k.header_type = hlir16.declarations.get(hlir16.declarations.get('metadata', 'Type_Struct').fields.get(k.header_name).type.path.name, 'Type_Struct')
+                k.header_type = k.header.header_type
+            elif hlir16.metadatas.get(k.header_name) is not None:
+                k.header = hlir16.metadatas.get(k.header_name)
+                header_type_name = k.header.type.path.name
+                k.header_type = hlir16.metadata_types.get(header_type_name)
+            elif k.header_name == 'standard_metadata':
+                # TODO create a header instance for standard_metadata
+                #k.header = hlir16.declarations.get('metadata', 'Type_Struct').fields.get(k.header_name)
+                header_type_name = 'standard_metadata_t'
+                k.header_type = hlir16.metadata_types.get(header_type_name)
             k.width = k.header_type.fields.get(k.field_name).type.size
             key_length += k.width
-        table.add_attrs({ 'key_length': (key_length+7)/8 })
-
-        if table.get_attr('match_type') is None:
-            # TODO is this OK?
-            table.add_attrs({
-                'match_type':
-                    'none',
-                'key_length':
-                    0,
-            })
-
-    for c in hlir16.declarations['P4Control']:
-        for t in c.controlLocals['P4Table']:
-            table_actions = []
-            for a in t.actions.actionList:
-                a.action_object = c.controlLocals.get(a.expression.method.path.name, 'P4Action')
-                table_actions.append(a)
-            t.remove_attr('actions')
-            t.add_attrs({'actions' : table_actions})
+        table.key_length = (key_length+7)/8
 
     # TODO remove
     if 'IPDB' in os.environ:
