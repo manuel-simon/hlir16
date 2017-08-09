@@ -19,6 +19,7 @@ import json
 import subprocess
 import os
 import tempfile
+import re
 from p4node import P4Node
 
 from utils_hlir16 import *
@@ -243,6 +244,9 @@ def set_additional_attrs(hlir16, nodes, p4_version):
             'metadata_types': [], 'metadatas': [], # TODO
         })
 
+    for h in hlir16.metadatas:
+        h.id = re.sub(r'\[([0-9]+)\]', r'_\1', "header_instance_"+h.name)
+
     # --------------------------------------------------------------------------
     # Headers and header types
 
@@ -253,7 +257,7 @@ def set_additional_attrs(hlir16, nodes, p4_version):
     elif hlir16.p4v == 16:
         hlir16.headers = hlir16.Parsed_packet.fields #['StructField']
 
-    def add_offsets_to_header(header_type):
+    def attribute_header_type(header_type):
         offset = 0
         for fld in header_type.fields:
             fld.add_attrs({'offset': offset})
@@ -261,16 +265,22 @@ def set_additional_attrs(hlir16, nodes, p4_version):
             if size is None:
                 size = get_type(hlir16, fld).size / 8
             offset += size
+            fld.is_vw = (fld.type.node_type == 'Type_Varbits') # 'Type_Bits' vs. 'Type_Varbits'
+
+    for h in hlir16.headers:
+        h.id = re.sub(r'\[([0-9]+)\]', r'_\1', "header_instance_"+h.name)
 
     for hdr in hlir16.headers:
         # TODO bit_offset, byte_offset, mask
         hdr.header_type = hlir16.declarations.get(hdr.type.path.name, "Type_Header")
-        add_offsets_to_header(hdr.header_type)
+
+    for ht in hlir16.header_types:
+        attribute_header_type(ht)
 
     # TODO standard_metadata_t is not accessible in P4-16?
     if hlir16.get_attr('standard_metadata_t') is not None:
         for meta in hlir16.metadata_types:
-            add_offsets_to_header(meta)
+            attribute_header_type(meta)
 
     # --------------------------------------------------------------------------
     # Controls and tables
@@ -347,6 +357,30 @@ def set_additional_attrs(hlir16, nodes, p4_version):
             k.width = k.header_type.fields.get(k.field_name).type.size
             key_length += k.width
         table.key_length = (key_length+7)/8
+
+    # --------------------------------------------------------------------------
+    # References in expressions
+
+    # Header references
+    for idx in hlir16.all_nodes:
+        node = hlir16.all_nodes[idx]
+        if type(node) is not P4Node:
+            continue
+        if node.node_type == 'Member':
+            if node.expr.node_type == 'PathExpression' and node.expr.path.name == 'hdr':
+                header_name = node.member
+                node.ref = hlir16.headers.get(header_name)
+
+    # Field references
+    for idx in hlir16.all_nodes:
+        node = hlir16.all_nodes[idx]
+        if type(node) is not P4Node:
+            continue
+        if node.node_type == 'Member':
+            if node.expr.node_type == 'Member':
+                if hasattr(node.expr, 'ref') and node.expr.ref.node_type == 'StructField':
+                    field_name = node.member
+                    node.ref = node.expr.ref.header_type.fields.get(field_name)
 
     # TODO remove
     if 'IPDB' in os.environ:
