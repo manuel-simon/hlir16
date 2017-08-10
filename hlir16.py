@@ -215,10 +215,12 @@ def set_additional_attrs(hlir16, nodes, p4_version):
 
         # Note: the external lambda makes sure the actual node is the operand,
         # not the last value that the "node" variable takes
-        node.paths_to = (lambda n: lambda value, print_details=False, match='prefix':
-            paths_to(n, value, print_details=print_details, match=match))(node),
-        node.by_type = (lambda n: lambda typename:
-            P4Node({}, [f for f in hlir16.declarations if f.node_type == typename or f.node_type == 'Type_' + typename]))(node),
+        node.set_attr('paths_to',
+            (lambda n: lambda value, print_details=False, match='prefix': paths_to(n, value, print_details=print_details, match=match))(node),
+        )
+        node.set_attr('by_type',
+            (lambda n: lambda typename: P4Node({}, [f for f in hlir16.declarations if f.node_type == typename or f.node_type == 'Type_' + typename]))(node),
+        )
 
     # --------------------------------------------------------------------------
     # Structs
@@ -244,35 +246,38 @@ def set_additional_attrs(hlir16, nodes, p4_version):
 
         all_header_infos = stds + metas + hdrs
         hlir16.header_instances = P4Node({}, [hdr for _, hdr, _, _, _ in all_header_infos])
-
-        for is_meta, hdr, hdr_name, hdr_type, hdr_bits in all_header_infos:
-            hdr_type.bit_width   = hdr_bits
-            hdr_type.byte_width  = bits_to_bytes(hdr_bits)
-            hdr_type.inst_name   = hdr_name
-            hdr_type.is_metadata = is_meta
-            hdr.type             = hdr_type
-
-            if is_meta:
-                hdr.name = hdr_name
-                hdr.type = hdr_type
-                hdr.node_type = "metadata"
-                hdr_type.inst_name = hdr_name
-
-        for hdr in hlir16.header_instances:
-            is_vw = False
-            for fld in hdr.type.fields:
-                # TODO this computation is probably unnecessary, remove if it is
-                fld.type = get_type(hlir16, fld)
-
-                fld.header = hdr
-                fld.is_vw = (fld.type.node_type == 'Type_Varbits') # 'Type_Bits' vs. 'Type_Varbits'
-                is_vw |= fld.is_vw
-            hdr.type.is_vw = is_vw
     elif hlir16.p4v == 16:
         hlir16.headers = hlir16.Parsed_packet.fields #['StructField']
 
-        # TODO
-        pass
+        hdrs  = [(False, hdr, hdr.name, hlir16.declarations.get(hdr.type.path.name, "Type_Header"), get_bit_width(hlir16, hdr)) for hdr in hlir16.headers]
+        # TODO add metadatas in P4-16
+        all_header_infos = hdrs
+        hlir16.header_instances = P4Node({}, [hdr for hdr in hlir16.headers])
+
+
+    for is_meta, hdr, hdr_name, hdr_type, hdr_bits in all_header_infos:
+        hdr_type.bit_width   = hdr_bits
+        hdr_type.byte_width  = bits_to_bytes(hdr_bits)
+        hdr_type.inst_name   = hdr_name
+        hdr_type.is_metadata = is_meta
+        hdr.type             = hdr_type
+
+        if is_meta:
+            hdr.name = hdr_name
+            hdr.type = hdr_type
+            hdr.node_type = "metadata"
+            hdr_type.inst_name = hdr_name
+
+    for hdr in hlir16.header_instances:
+        is_vw = False
+        for fld in hdr.type.fields:
+            # TODO this computation is probably unnecessary, remove if it is
+            fld.type = get_type(hlir16, fld)
+
+            fld.header = hdr
+            fld.is_vw = (fld.type.node_type == 'Type_Varbits') # 'Type_Bits' vs. 'Type_Varbits'
+            is_vw |= fld.is_vw
+        hdr.type.is_vw = is_vw
 
     # --------------------------------------------------------------------------
     # Header fields
@@ -348,22 +353,32 @@ def set_additional_attrs(hlir16, nodes, p4_version):
     for table in hlir16.tables:
         table.match_type = match_type(table)
         key_length = 0
+
         for k in table.key.keyElements:
+            expr = k.expression.get_attr('expr')
+            if expr is None:
+                key_length += k.expression.type.size
+                continue
+
             # supposing that k.expression is of form '<header_name>.<name>'
-            if k.expression.expr.node_type == 'PathExpression':
-                k.header_name = k.expression.expr.path.name
+            if expr.node_type == 'PathExpression':
+                k.header_name = expr.path.name
                 k.field_name = k.expression.member
             # supposing that k.expression is of form 'hdr.<header_name>.<name>'
-            elif k.expression.expr.node_type == 'Member':
-                k.header_name = k.expression.expr.member
+            elif expr.node_type == 'Member':
+                k.header_name = expr.member
                 k.field_name = k.expression.member
             k.match_type = k.matchType.path.name
             k.id = 'field_instance_' + k.header_name + '_' + k.field_name
 
             k.header = hlir16.header_instances.get(k.header_name)
 
-            k.width = k.header.type.fields.get(k.field_name).type.size
-            key_length += k.width
+            if k.header is None:
+                # TODO seems to happen for some PathExpressions
+                pass
+            else:
+                k.width = k.header.type.fields.get(k.field_name).type.size
+                key_length += k.width
         table.key_length_bits  = key_length
         table.key_length_bytes = bits_to_bytes(key_length)
 
