@@ -21,37 +21,34 @@ class P4Node(object):
     Related nodes are accessed via attributes,
     with some shortcuts for vectors."""
 
+    common_attrs = {
+        "_data",
+        "Node_Type",
+        "Node_ID",
+        "node_parents",
+        "vec",
+        "add_attr",
+        "is_vec",
+        "set_vec",
+        "json_data",
+        "node_type",
+        "xdir",
+        "remove_attr",
+        "get_attr",
+        "set_attr",
+        "define_common_attrs",
+        "set_vec",
+        "is_vec",
+        "common_attrs",
+        "get",
+        "str",
+        "id",
+    }
+
     def __init__(self, dict, vec=None):
         self.__dict__ = dict
         self._data = {}
         self.vec = vec
-        self.common_attrs = {
-            "_data",
-            "Node_Type",
-            "Node_ID",
-            "node_parents",
-            "vec",
-            "add_attr",
-            "is_vec",
-            "set_vec",
-            "json_data",
-            "node_type",
-            "xdir",
-            "remove_attr",
-            "get_attr",
-            "add_attrs",
-            "add_common_attrs",
-            "set_vec",
-            "is_vec",
-            "common_attrs",
-            "get",
-            "str",
-            "id",
-
-            # "all_nodes",
-            # "all_p4_nodes",
-            # "paths_to",
-        }
 
     def __str__(self, show_name=True, show_type=True, show_funs=True):
         """A textual representation of a P4 HLIR node."""
@@ -61,7 +58,6 @@ class P4Node(object):
             return str(self.vec)
 
         name = self.name if hasattr(self, 'name') else ""
-        # funs = [k for k in self.json_data.keys() if k not in self.common_attrs]
 
         part1 = name if show_name else ""
         part2 = "<{}>".format(self.node_type) if show_type else ""
@@ -90,20 +86,23 @@ class P4Node(object):
             return 0
         return len(self.vec)
 
+    def __iter__(self):
+        if self.vec is not None:
+            for x in self.vec:
+                yield x
+
     def remove_attr(self, key):
         del self.__dict__[key]
 
-    def add_attrs(self, dict):
-        """Adds attributes to the object."""
-        for key, value in dict.items():
-            self.__dict__[key] = value
+    def set_attr(self, key, value):
+        """Sets an attribute of the object."""
+        self.__dict__[key] = value
 
-    def add_common_attrs(self, dict):
-        """Adds attribute to the object.
-        This attribute will not be listed by the str and xdir operations."""
-        for key, value in dict.items():
-            self.__dict__[key] = value
-            self.common_attrs.add(key)
+    def define_common_attrs(self, attr_names):
+        """The attribute names in the list will not be listed
+        by the str and xdir operations."""
+        for attr_name in attr_names:
+            P4Node.common_attrs.add(attr_name)
 
     def get_attr(self, key):
         if key not in self.__dict__:
@@ -119,7 +118,7 @@ class P4Node(object):
 
     def xdir(self):
         """Lists the noncommon attributes of the node."""
-        return [d for d in dir(self) if not d.startswith("__") and d not in self.common_attrs]
+        return [d for d in dir(self) if not d.startswith("__") and d not in P4Node.common_attrs]
 
     def str(self, show_name=True, show_type=True, show_funs=True):
         return P4Node.__str__(self, show_name, show_type, show_funs)
