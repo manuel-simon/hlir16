@@ -15,6 +15,10 @@
 # limitations under the License.
 
 
+extra_node_id = -1000
+
+p4node_last_failure      = None
+p4node_last_failure_path = []
 
 class P4Node(object):
     """These objects represent nodes in the HLIR.
@@ -47,6 +51,10 @@ class P4Node(object):
 
     def __init__(self, dict, vec=None):
         self.__dict__ = dict
+        if 'Node_ID' not in dict:
+            global extra_node_id
+            self.Node_ID = extra_node_id
+            extra_node_id -= 1
         self._data = {}
         self.vec = vec
 
@@ -63,7 +71,7 @@ class P4Node(object):
         part2 = "<{}>".format(self.node_type) if show_type else ""
         part3 = "[{}]".format(', '.join(self.xdir())) if show_funs else ""
 
-        return "{}{}{}".format(part1, part2, part3)
+        return "{}{}[#{}]{}".format(part1, part2, str(self.get_attr('Node_ID')), part3)
 
     def __repr__(self):
         return self.__str__()
@@ -105,7 +113,13 @@ class P4Node(object):
             P4Node.common_attrs.add(attr_name)
 
     def get_attr(self, key):
+        global p4node_last_failure
+        global p4node_last_failure_path
+
         if key not in self.__dict__:
+            if p4node_last_failure is None:
+                p4node_last_failure = self
+            p4node_last_failure_path.append(key)
             return None
         return self.__dict__[key]
 
