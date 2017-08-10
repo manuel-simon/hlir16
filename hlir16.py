@@ -55,16 +55,14 @@ def p4node_creator(node, elems, nodes, skip_elems, node_parent_chain):
     node_id = node['Node_ID']
     p4node = nodes[node_id]
 
-    p4node.add_attrs({
-        "id": node_id,
-        "json_data": node,
-    })
+    p4node.id = node_id
+    p4node.json_data = node
 
     if node_parent_chain not in p4node.node_parents:
         p4node.node_parents += [node_parent_chain]
 
     if 'Node_Type' in node.keys():
-        p4node.add_attrs({"node_type": node['Node_Type']})
+        p4node.node_type = node['Node_Type']
         p4node.remove_attr('incomplete_json_data')
 
     if 'vec' in node.keys():
@@ -72,7 +70,7 @@ def p4node_creator(node, elems, nodes, skip_elems, node_parent_chain):
         nodes[node_id].set_vec(no_key_elems)
     else:
         for key, subnode in elems:
-            nodes[node_id].add_attrs({key: subnode})
+            nodes[node_id].set_attr(key, subnode)
 
     return nodes[node_id]
 
@@ -103,7 +101,7 @@ def create_p4_json_file(p4c_filename, p4_version=None, p4c_path=None, json_filen
 
 ERR_CODE_NO_PROGRAM = -1000
 def load_p4_json_file(json_filename, p4_version):
-    """Returns either ERR_CODE_NO_PROGRAM, an int, or a P4Node object."""
+    """Returns either ERR_CODE_NO_PROGRAM (an int), or a P4Node object."""
     with open(json_filename, 'r') as f:
         json_root = json.load(f)
 
@@ -194,54 +192,38 @@ def paths_to(node, value, max_depth=20, path=[], root=None, max_length=70, print
         paths_to(getattr(node, attr), value, max_depth - 1, path + [attr], root, max_length, print_details, match)
 
 
-
 def set_additional_attrs(hlir16, nodes, p4_version):
 
     # --------------------------------------------------------------------------
     # Common
 
-    hlir16.add_common_attrs({
-        "all_nodes":
-            nodes,
-        "p4v":
-            p4_version,
-    }),
+    hlir16.define_common_attrs([
+        "all_nodes",
+        "p4v",
+        'paths_to',
+        'by_type',
+    ]),
+
+    hlir16.all_nodes = nodes
+    hlir16.p4v = p4_version
 
     for idx in hlir16.all_nodes:
         node = hlir16.all_nodes[idx]
         if type(node) is not P4Node:
             continue
-        node.add_common_attrs({
-            'paths_to':
-                # Note: the external lambda makes sure the actual node is the operand,
-                # not the last value that the "node" variable takes
-                (lambda n: lambda value, print_details=False, match='prefix': paths_to(n, value, print_details=print_details, match=match))(node),
-            'by_type':
-                (lambda n: lambda typename: P4Node({}, [f for f in hlir16.declarations if f.node_type == typename or f.node_type == 'Type_' + typename]))(node),
-        })
+
+        # Note: the external lambda makes sure the actual node is the operand,
+        # not the last value that the "node" variable takes
+        node.paths_to = (lambda n: lambda value, print_details=False, match='prefix':
+            paths_to(n, value, print_details=print_details, match=match))(node),
+        node.by_type = (lambda n: lambda typename:
+            P4Node({}, [f for f in hlir16.declarations if f.node_type == typename or f.node_type == 'Type_' + typename]))(node),
 
     # --------------------------------------------------------------------------
     # Structs
 
     for struct in hlir16.declarations['Type_Struct']:
-        hlir16.add_attrs({
-            struct.name: struct
-        })
-
-    # --------------------------------------------------------------------------
-    # Metadatas and metadata types
-
-    if hlir16.p4v == 14:
-        hlir16.metadatas = hlir16.declarations.get('metadata', 'Type_Struct').fields
-        hlir16.metadata_types = P4Node({}, [hlir16.standard_metadata_t] +
-                                           [hlir16.declarations.get(meta.type.path.name, 'Type_Struct') for meta in hlir16.metadatas])
-        metadata_inst_names = ['standard_metadata'] + [meta.annotations.annotations.get('name', 'Annotation').expr[0].value for meta in hlir16.metadatas]
-        for meta, name in zip(hlir16.metadata_types, metadata_inst_names):
-            meta.inst_name = name
-    else:
-        hlir16.add_attrs({
-            'metadata_types': [], 'metadatas': [], # TODO
-        })
+        hlir16.set_attr(struct.name, struct)
 
     # --------------------------------------------------------------------------
     # Headers and header types
@@ -253,24 +235,54 @@ def set_additional_attrs(hlir16, nodes, p4_version):
     elif hlir16.p4v == 16:
         hlir16.headers = hlir16.Parsed_packet.fields #['StructField']
 
-    def add_offsets_to_header(header_type):
+    # --------------------------------------------------------------------------
+    # Metadatas and metadata types
+
+    if hlir16.p4v == 14:
+        metadatas = hlir16.declarations.get('metadata', 'Type_Struct').fields
+
+        stdmeta = hlir16.standard_metadata_t
+        stds  = [( True, stdmeta, "standard_metadata", stdmeta, type_bit_width(hlir16, stdmeta))]
+        metas = [( True, meta, meta.inst_name, meta, type_bit_width(hlir16, meta)) for meta in metadatas]
+        hdrs  = [(False, hdr, hdr.name, hlir16.declarations.get(hdr.type.path.name, "Type_Header"), get_bit_width(hlir16, hdr)) for hdr in hlir16.headers]
+
+        all_headers = stds + metas + hdrs
+        hlir16.all_headers = [hdr_type for _, _, _, hdr_type, _ in all_headers]
+
+        for is_meta, hdr, hdr_name, hdr_type, hdr_bits in all_headers:
+            hdr_type.bit_width   = hdr_bits
+            hdr_type.byte_width  = bits_to_bytes(hdr_bits)
+            hdr_type.inst_name   = hdr_name
+            hdr_type.is_metadata = is_meta
+            if not is_meta:
+                hdr.header_type = hdr_type
+
+        for hdr in hlir16.all_headers:
+            for fld in hdr.fields:
+                # TODO this computation is probably unnecessary, remove if it is
+                fld.type = get_type(hlir16, fld)
+
+                fld.header = hdr
+    else:
+        # TODO
+        pass
+
+    # --------------------------------------------------------------------------
+    # Header fields
+
+    for hdr in hlir16.all_headers:
+        # TODO bit_offset, byte_offset, mask
+
         offset = 0
-        for fld in header_type.fields:
-            fld.add_attrs({'offset': offset})
+        for fld in hdr.fields:
+            fld.offset = offset
+
             size = fld.type.get_attr('size')
-            if size is None:
+            if size is not None:
+                fld.size = size
+            else:
                 size = get_type(hlir16, fld).size / 8
             offset += size
-
-    for hdr in hlir16.headers:
-        # TODO bit_offset, byte_offset, mask
-        hdr.header_type = hlir16.declarations.get(hdr.type.path.name, "Type_Header")
-        add_offsets_to_header(hdr.header_type)
-
-    # TODO standard_metadata_t is not accessible in P4-16?
-    if hlir16.get_attr('standard_metadata_t') is not None:
-        for meta in hlir16.metadata_types:
-            add_offsets_to_header(meta)
 
     # --------------------------------------------------------------------------
     # Controls and tables
@@ -288,9 +300,7 @@ def set_additional_attrs(hlir16, nodes, p4_version):
 
     for table in hlir16.tables:
         for prop in table.properties.properties:
-            table.add_attrs({
-                prop.name: prop.value,
-            })
+            table.set_attr(prop.name, prop.value)
         table.remove_attr('properties')
 
     for c in hlir16.controls:
@@ -346,7 +356,8 @@ def set_additional_attrs(hlir16, nodes, p4_version):
                 k.header_type = hlir16.metadata_types.get(header_type_name)
             k.width = k.header_type.fields.get(k.field_name).type.size
             key_length += k.width
-        table.key_length = (key_length+7)/8
+        table.key_length_bits  = key_length
+        table.key_length_bytes = bits_to_bytes(key_length)
 
     # TODO remove
     if 'IPDB' in os.environ:
@@ -355,7 +366,7 @@ def set_additional_attrs(hlir16, nodes, p4_version):
 
 
 def load_p4(filename, p4_version=None, p4c_path=None):
-    """Returns either an error code, an int, or a P4Node object."""
+    """Returns either an error code (an int), or a P4Node object."""
     if p4c_path is None:
         p4c_path = os.environ['P4C']
 
