@@ -233,50 +233,55 @@ def set_additional_attrs(hlir16, nodes, p4_version):
 
     if hlir16.p4v == 14:
         hlir16.headers = hlir16.declarations.get("headers", "Type_Struct").fields #['StructField']
-    elif hlir16.p4v == 16:
-        hlir16.headers = hlir16.Parsed_packet.fields #['StructField']
 
-    # --------------------------------------------------------------------------
-    # Metadatas and metadata types
-
-    if hlir16.p4v == 14:
-        metadatas = hlir16.declarations.get('metadata', 'Type_Struct').fields
+        meta_fields = hlir16.declarations.get('metadata', 'Type_Struct').fields
+        hlir16.metadatas = P4Node({}, [hlir16.declarations.get(mf.type.path.name) for mf in meta_fields])
 
         stdmeta = hlir16.standard_metadata_t
-        stds  = [( True, stdmeta, "standard_metadata", stdmeta, type_bit_width(hlir16, stdmeta))]
-        metas = [( True, meta, meta.inst_name, meta, type_bit_width(hlir16, meta)) for meta in metadatas]
+        stds  = [( True, P4Node({}), "standard_metadata", stdmeta, type_bit_width(hlir16, stdmeta))]
+        metas = [( True, P4Node({}), mf.name, meta, type_bit_width(hlir16, meta)) for meta, mf in zip(hlir16.metadatas, meta_fields)]
         hdrs  = [(False, hdr, hdr.name, hlir16.declarations.get(hdr.type.path.name, "Type_Header"), get_bit_width(hlir16, hdr)) for hdr in hlir16.headers]
 
-        all_headers = stds + metas + hdrs
-        hlir16.all_headers = [hdr_type for _, _, _, hdr_type, _ in all_headers]
+        all_header_infos = stds + metas + hdrs
+        hlir16.header_instances = P4Node({}, [hdr for _, hdr, _, _, _ in all_header_infos])
 
-        for is_meta, hdr, hdr_name, hdr_type, hdr_bits in all_headers:
+        for is_meta, hdr, hdr_name, hdr_type, hdr_bits in all_header_infos:
             hdr_type.bit_width   = hdr_bits
             hdr_type.byte_width  = bits_to_bytes(hdr_bits)
             hdr_type.inst_name   = hdr_name
             hdr_type.is_metadata = is_meta
-            if not is_meta:
-                hdr.header_type = hdr_type
+            hdr.type             = hdr_type
 
-        for hdr in hlir16.all_headers:
-            for fld in hdr.fields:
+            if is_meta:
+                hdr.name = hdr_name
+                hdr.type = hdr_type
+                hdr.node_type = "metadata"
+                hdr_type.inst_name = hdr_name
+
+        for hdr in hlir16.header_instances:
+            is_vw = False
+            for fld in hdr.type.fields:
                 # TODO this computation is probably unnecessary, remove if it is
                 fld.type = get_type(hlir16, fld)
 
                 fld.header = hdr
                 fld.is_vw = (fld.type.node_type == 'Type_Varbits') # 'Type_Bits' vs. 'Type_Varbits'
-    else:
+                is_vw |= fld.is_vw
+            hdr.type.is_vw = is_vw
+    elif hlir16.p4v == 16:
+        hlir16.headers = hlir16.Parsed_packet.fields #['StructField']
+
         # TODO
         pass
 
     # --------------------------------------------------------------------------
     # Header fields
 
-    for hdr in hlir16.all_headers:
+    for hdr in hlir16.header_instances:
         # TODO bit_offset, byte_offset, mask
 
         offset = 0
-        for fld in hdr.fields:
+        for fld in hdr.type.fields:
             fld.offset = offset
 
             size = fld.type.get_attr('size')
@@ -287,13 +292,14 @@ def set_additional_attrs(hlir16, nodes, p4_version):
             offset += size
             fld.is_vw = (fld.type.node_type == 'Type_Varbits') # 'Type_Bits' vs. 'Type_Varbits'
 
-    for hdr in hlir16.all_headers:
-        if hdr.is_metadata:
+    for hdr in hlir16.header_instances:
+        if hdr.type.is_metadata:
             hdr.id = re.sub(r'\[([0-9]+)\]', r'_\1', "header_instance_"+hdr.name)
 
-    for hdr in hlir16.headers:
-        # TODO bit_offset, byte_offset, mask
-        hdr.header_type = hlir16.declarations.get(hdr.type.path.name, "Type_Header")
+    # TODO deprecated?
+    # for hdr in hlir16.headers:
+    #     # TODO bit_offset, byte_offset, mask
+    #     hdr.header_type = hlir16.declarations.get(hdr.type.path.name, "Type_Header")
 
     # --------------------------------------------------------------------------
     # Controls and tables
@@ -353,19 +359,10 @@ def set_additional_attrs(hlir16, nodes, p4_version):
                 k.field_name = k.expression.member
             k.match_type = k.matchType.path.name
             k.id = 'field_instance_' + k.header_name + '_' + k.field_name
-            if hlir16.headers.get(k.header_name) is not None:
-                k.header = hlir16.headers.get(k.header_name)
-                k.header_type = k.header.header_type
-            elif hlir16.metadatas.get(k.header_name) is not None:
-                k.header = hlir16.metadatas.get(k.header_name)
-                header_type_name = k.header.type.path.name
-                k.header_type = hlir16.metadata_types.get(header_type_name)
-            elif k.header_name == 'standard_metadata':
-                # TODO create a header instance for standard_metadata
-                #k.header = hlir16.declarations.get('metadata', 'Type_Struct').fields.get(k.header_name)
-                header_type_name = 'standard_metadata_t'
-                k.header_type = hlir16.metadata_types.get(header_type_name)
-            k.width = k.header_type.fields.get(k.field_name).type.size
+
+            k.header = hlir16.header_instances.get(k.header_name)
+
+            k.width = k.header.type.fields.get(k.field_name).type.size
             key_length += k.width
         table.key_length_bits  = key_length
         table.key_length_bytes = bits_to_bytes(key_length)
@@ -392,12 +389,8 @@ def set_additional_attrs(hlir16, nodes, p4_version):
             if node.expr.node_type == 'Member':
                 if hasattr(node.expr, 'ref') and node.expr.ref.node_type == 'StructField':
                     field_name = node.member
-                    node.ref = node.expr.ref.header_type.fields.get(field_name)
 
-    # TODO remove
-    if 'IPDB' in os.environ:
-        import ipdb
-        ipdb.set_trace()
+                    node.ref = node.expr.ref.type.fields.get(field_name)
 
 
 def load_p4(filename, p4_version=None, p4c_path=None):
