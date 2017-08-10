@@ -19,6 +19,7 @@ import json
 import subprocess
 import os
 import tempfile
+import re
 from p4node import P4Node
 
 from utils_hlir16 import *
@@ -263,6 +264,7 @@ def set_additional_attrs(hlir16, nodes, p4_version):
                 fld.type = get_type(hlir16, fld)
 
                 fld.header = hdr
+                fld.is_vw = (fld.type.node_type == 'Type_Varbits') # 'Type_Bits' vs. 'Type_Varbits'
     else:
         # TODO
         pass
@@ -283,6 +285,15 @@ def set_additional_attrs(hlir16, nodes, p4_version):
             else:
                 size = get_type(hlir16, fld).size / 8
             offset += size
+            fld.is_vw = (fld.type.node_type == 'Type_Varbits') # 'Type_Bits' vs. 'Type_Varbits'
+
+    for hdr in hlir16.all_headers:
+        if hdr.is_metadata:
+            hdr.id = re.sub(r'\[([0-9]+)\]', r'_\1', "header_instance_"+hdr.name)
+
+    for hdr in hlir16.headers:
+        # TODO bit_offset, byte_offset, mask
+        hdr.header_type = hlir16.declarations.get(hdr.type.path.name, "Type_Header")
 
     # --------------------------------------------------------------------------
     # Controls and tables
@@ -358,6 +369,30 @@ def set_additional_attrs(hlir16, nodes, p4_version):
             key_length += k.width
         table.key_length_bits  = key_length
         table.key_length_bytes = bits_to_bytes(key_length)
+
+    # --------------------------------------------------------------------------
+    # References in expressions
+
+    # Header references
+    for idx in hlir16.all_nodes:
+        node = hlir16.all_nodes[idx]
+        if type(node) is not P4Node:
+            continue
+        if node.node_type == 'Member':
+            if node.expr.node_type == 'PathExpression' and node.expr.path.name == 'hdr':
+                header_name = node.member
+                node.ref = hlir16.headers.get(header_name)
+
+    # Field references
+    for idx in hlir16.all_nodes:
+        node = hlir16.all_nodes[idx]
+        if type(node) is not P4Node:
+            continue
+        if node.node_type == 'Member':
+            if node.expr.node_type == 'Member':
+                if hasattr(node.expr, 'ref') and node.expr.ref.node_type == 'StructField':
+                    field_name = node.member
+                    node.ref = node.expr.ref.header_type.fields.get(field_name)
 
     # TODO remove
     if 'IPDB' in os.environ:
