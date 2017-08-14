@@ -30,6 +30,9 @@ def get_type(hlir16, node):
     if node.type.node_type == "Type_Bits":
         return node.type
 
+    if node.type.node_type == "Type_Varbits":
+        return node.type
+
     if node.type.node_type == "Type_Name":
         htype_name = node.type.path.name
 

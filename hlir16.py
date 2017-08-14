@@ -258,7 +258,7 @@ def set_additional_attrs(hlir16, nodes, p4_version):
     for is_meta, hdr, hdr_name, hdr_type, hdr_bits in all_header_infos:
         hdr_type.bit_width   = hdr_bits
         hdr_type.byte_width  = bits_to_bytes(hdr_bits)
-        hdr_type.inst_name   = hdr_name
+        hdr_type.inst_name   = hdr_name # TODO there can be multiple instances
         hdr_type.is_metadata = is_meta
         hdr.type             = hdr_type
 
@@ -271,10 +271,7 @@ def set_additional_attrs(hlir16, nodes, p4_version):
     for hdr in hlir16.header_instances:
         is_vw = False
         for fld in hdr.type.fields:
-            # TODO this computation is probably unnecessary, remove if it is
-            fld.type = get_type(hlir16, fld)
-
-            fld.header = hdr
+            fld.header = hdr # TODO there can be multiple instances
             fld.is_vw = (fld.type.node_type == 'Type_Varbits') # 'Type_Bits' vs. 'Type_Varbits'
             is_vw |= fld.is_vw
         hdr.type.is_vw = is_vw
@@ -298,8 +295,7 @@ def set_additional_attrs(hlir16, nodes, p4_version):
             fld.is_vw = (fld.type.node_type == 'Type_Varbits') # 'Type_Bits' vs. 'Type_Varbits'
 
     for hdr in hlir16.header_instances:
-        if hdr.type.is_metadata:
-            hdr.id = re.sub(r'\[([0-9]+)\]', r'_\1', "header_instance_"+hdr.name)
+        hdr.id = re.sub(r'\[([0-9]+)\]', r'_\1', "header_instance_"+hdr.name)
 
     # TODO deprecated?
     # for hdr in hlir16.headers:
@@ -407,6 +403,15 @@ def set_additional_attrs(hlir16, nodes, p4_version):
 
                     node.ref = node.expr.ref.type.fields.get(field_name)
 
+    # Type references
+    for idx in hlir16.all_nodes:
+        node = hlir16.all_nodes[idx]
+        if type(node) is not P4Node:
+            continue
+        if node.node_type == 'Type_Name' and hasattr(node, 'path'):
+            t = hlir16.declarations.get(node.path.name)
+            if t is not None:
+                node.ref = t
 
 def load_p4(filename, p4_version=None, p4c_path=None):
     """Returns either an error code (an int), or a P4Node object."""
