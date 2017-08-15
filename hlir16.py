@@ -287,10 +287,10 @@ def set_additional_attrs(hlir16, nodes, p4_version):
             fld.offset = offset
 
             size = fld.type.get_attr('size')
-            if size is not None:
-                fld.size = size
-            else:
+            if size is None:
                 size = get_type(hlir16, fld).size / 8
+
+            fld.size = size
             offset += size
             fld.is_vw = (fld.type.node_type == 'Type_Varbits') # 'Type_Bits' vs. 'Type_Varbits'
 
@@ -373,7 +373,13 @@ def set_additional_attrs(hlir16, nodes, p4_version):
                 # TODO seems to happen for some PathExpressions
                 pass
             else:
-                k.width = k.header.type.fields.get(k.field_name).type.size
+                size = k.get_attr('size')
+
+                if size is None:
+                    kfld = k.header.type.fields.get(k.field_name)
+                    k.width = get_type(hlir16, kfld).size
+                else:
+                    k.width = size
                 key_length += k.width
         table.key_length_bits  = key_length
         table.key_length_bytes = bits_to_bytes(key_length)
