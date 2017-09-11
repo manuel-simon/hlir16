@@ -231,76 +231,101 @@ def set_additional_attrs(hlir16, nodes, p4_version):
     # --------------------------------------------------------------------------
     # Headers and header types
 
-    hlir16.header_types = hlir16.declarations['Type_Header']
-
     if hlir16.p4v == 14:
-        hlir16.headers = hlir16.declarations.get("headers", "Type_Struct").fields #['StructField']
 
-        meta_fields = hlir16.declarations.get('metadata', 'Type_Struct').fields
-        hlir16.metadatas = P4Node({}, [hlir16.declarations.get(mf.type.path.name) for mf in meta_fields])
+        # ----------------------------------------------------------------------
+        # Collecting header instances
 
-        stdmeta = hlir16.standard_metadata_t
-        stds  = [( True, P4Node({}), "standard_metadata", stdmeta, type_bit_width(hlir16, stdmeta))]
-        metas = [( True, P4Node({}), mf.name, meta, type_bit_width(hlir16, meta)) for meta, mf in zip(hlir16.metadatas, meta_fields)]
-        hdrs  = [(False, hdr, hdr.name, hlir16.declarations.get(hdr.type.path.name, "Type_Header"), get_bit_width(hlir16, hdr)) for hdr in hlir16.headers]
+        header_instances = hlir16.declarations.get("headers", "Type_Struct").fields['StructField']
+        metadata_instances = hlir16.declarations.get('metadata', 'Type_Struct').fields['StructField']
 
-        all_header_infos = stds + metas + hdrs
-        hlir16.header_instances = P4Node({}, [hdr for _, hdr, _, _, _ in all_header_infos])
+        # ----------------------------------------------------------------------
+        # Connecting instances with types
+
+        for h in header_instances:
+            h.type = hlir16.declarations.get(h.type.path.name, "Type_Header")
+        for h in metadata_instances:
+            h.type = hlir16.declarations.get(h.type.path.name, "Type_Struct")
+
+        # ----------------------------------------------------------------------
+        # Collecting header types
+
+        hlir16.header_types = P4Node({}, hlir16.declarations['Type_Header'])
+        hlir16.header_types.node_type = 'header_type_list'
+        for h in hlir16.header_types:
+            h.is_metadata = False
+
+        metadata_types = []
+        for h in metadata_instances:
+            metadata_types.append(h.type)
+        for h in metadata_types:
+            h.is_metadata = True
+
+        # ----------------------------------------------------------------------
+        # Creating the standard metadata
+
+        standard_metadata = P4Node({})
+        standard_metadata.node_type = 'header_instance'
+        standard_metadata.name = "standard_metadata"
+        standard_metadata.type = hlir16.standard_metadata_t
+        hlir16.standard_metadata_t.is_metadata = True
+        metadata_instances.append(standard_metadata)
+        metadata_types.append(hlir16.standard_metadata_t)
+
+
+        # ----------------------------------------------------------------------
+        # Writing the types and instances to hlir16
+
+        hlir16.header_types.vec += metadata_types
+
+        hlir16.header_instances = P4Node({}, header_instances + metadata_instances)
+        hlir16.header_instances.node_type = 'header_instance_list'
+
     elif hlir16.p4v == 16:
-        hlir16.headers = hlir16.Parsed_packet.fields #['StructField']
-
+        hlir16.header_instances = hlir16.Parsed_packet.fields #['StructField']
         hdrs  = [(False, hdr, hdr.name, hlir16.declarations.get(hdr.type.path.name, "Type_Header"), get_bit_width(hlir16, hdr)) for hdr in hlir16.headers]
         # TODO add metadatas in P4-16
         all_header_infos = hdrs
-        hlir16.header_instances = P4Node({}, [hdr for hdr in hlir16.headers])
 
-
-    for is_meta, hdr, hdr_name, hdr_type, hdr_bits in all_header_infos:
-        hdr_type.bit_width   = hdr_bits
-        hdr_type.byte_width  = bits_to_bytes(hdr_bits)
-        hdr_type.inst_name   = hdr_name # TODO there can be multiple instances
-        hdr_type.is_metadata = is_meta
-        hdr.type             = hdr_type
-
-        if is_meta:
-            hdr.name = hdr_name
-            hdr.type = hdr_type
-            hdr.node_type = "metadata"
-            hdr_type.inst_name = hdr_name
-
-    for hdr in hlir16.header_instances:
-        is_vw = False
-        for fld in hdr.type.fields:
-            fld.header = hdr # TODO there can be multiple instances
-            fld.is_vw = (fld.type.node_type == 'Type_Varbits') # 'Type_Bits' vs. 'Type_Varbits'
-            is_vw |= fld.is_vw
-        hdr.type.is_vw = is_vw
-
-    # --------------------------------------------------------------------------
-    # Header fields
-
-    for hdr in hlir16.header_instances:
-        # TODO bit_offset, byte_offset, mask
-
+    for h in hlir16.header_types:
+        #h.size = type_bit_width(hlir16, h)
+        h.id = 'header_'+h.name
         offset = 0
-        for fld in hdr.type.fields:
-            fld.offset = offset
-
-            size = fld.type.get_attr('size')
+        h.bit_width   = sum([get_type(hlir16, f).size for f in h.fields])
+        h.byte_width  = bits_to_bytes(h.bit_width)
+        is_vw = False
+        for f in h.fields:
+            f.id = 'field_' + h.name + '_' + f.name # TODO
+            # TODO bit_offset, byte_offset, mask
+            f.offset = offset
+            size = f.type.get_attr('size')
             if size is None:
-                size = get_type(hlir16, fld).size / 8
-
-            fld.size = size
+                size = get_type(hlir16, f).size / 8
+            f.size = size
             offset += size
-            fld.is_vw = (fld.type.node_type == 'Type_Varbits') # 'Type_Bits' vs. 'Type_Varbits'
+            f.is_vw = (f.type.node_type == 'Type_Varbits') # 'Type_Bits' vs. 'Type_Varbits'
+            is_vw |= f.is_vw
+            f.preparsed = False #f.name == 'ttl'
+        h.is_vw = is_vw
 
     for hdr in hlir16.header_instances:
         hdr.id = re.sub(r'\[([0-9]+)\]', r'_\1', "header_instance_"+hdr.name)
-
-    # TODO deprecated?
-    # for hdr in hlir16.headers:
-    #     # TODO bit_offset, byte_offset, mask
-    #     hdr.header_type = hlir16.declarations.get(hdr.type.path.name, "Type_Header")
+        def resolve_field_refs(n):
+            if n is not None and isinstance(n, P4Node):
+                if n.node_type == 'Path': # let's suppose it's a field name and cheat the further phases
+                    fn = n.name
+                    n.name = '(GET_INT32_AUTO_PACKET(pd,' + hdr.id + ', field_' + fn + '))'
+                else:
+                    ns = map(lambda l: n.get_attr(l), n.xdir())
+                    for n in ns:
+                        resolve_field_refs(n)
+        if hdr.type.is_vw:
+            for f in hdr.type.fields:
+                if f.is_vw:
+                    len_expr = f.annotations.annotations[0].expr[0]
+                    len_expr = len_expr.left.left # ignoring `* 8 - <length of the rest of fields>`
+                    resolve_field_refs(len_expr)
+                    hdr.length = len_expr
 
     # --------------------------------------------------------------------------
     # Controls and tables
@@ -395,7 +420,9 @@ def set_additional_attrs(hlir16, nodes, p4_version):
         if node.node_type == 'Member':
             if node.expr.node_type == 'PathExpression' and node.expr.path.name == 'hdr':
                 header_name = node.member
-                node.ref = hlir16.headers.get(header_name)
+                header = hlir16.header_instances.get(header_name)
+                if header is not None:
+                    node.ref = header
 
     # Field references
     for idx in hlir16.all_nodes:
@@ -406,8 +433,9 @@ def set_additional_attrs(hlir16, nodes, p4_version):
             if node.expr.node_type == 'Member':
                 if hasattr(node.expr, 'ref') and node.expr.ref.node_type == 'StructField':
                     field_name = node.member
-
-                    node.ref = node.expr.ref.type.fields.get(field_name)
+                    field = node.expr.ref.type.fields.get(field_name)
+                    if field is not None:
+                        node.ref = field
 
     # Type references
     for idx in hlir16.all_nodes:
