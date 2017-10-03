@@ -229,65 +229,49 @@ def set_additional_attrs(hlir16, nodes, p4_version):
         hlir16.set_attr(struct.name, struct)
 
     # --------------------------------------------------------------------------
-    # Headers and header types
+    # Package and package instance
 
-    if hlir16.p4v == 14:
+    package_instance = hlir16.declarations.by_type('Declaration_Instance')[0] #TODO: what to do when there are more than one instances
+    package_name = package_instance.type.baseType.path.name
 
+    if package_name == 'V1Switch':
         # ----------------------------------------------------------------------
         # Collecting header instances
 
-        header_instances = hlir16.declarations.get("headers", "Type_Struct").fields['StructField']
-        metadata_instances = hlir16.declarations.get('metadata', 'Type_Struct').fields['StructField']
-
-        # ----------------------------------------------------------------------
-        # Connecting instances with types
-
-        for h in header_instances:
-            h.type = hlir16.declarations.get(h.type.path.name, "Type_Header")
-        for h in metadata_instances:
-            h.type = hlir16.declarations.get(h.type.path.name, "Type_Struct")
-
-        # ----------------------------------------------------------------------
-        # Collecting header types
-
-        hlir16.header_types = P4Node({}, hlir16.declarations['Type_Header'])
-        hlir16.header_types.node_type = 'header_type_list'
-        for h in hlir16.header_types:
-            h.is_metadata = False
-
-        metadata_types = []
-        for h in metadata_instances:
-            metadata_types.append(h.type)
-        for h in metadata_types:
-            h.is_metadata = True
+        #TODO: is there always a struct containing all headers?
+        header_instances = hlir16.declarations.get(package_instance.type.arguments[0].path.name, 'Type_Struct').fields['StructField']
+        metadata_instances = hlir16.declarations.get(package_instance.type.arguments[1].path.name, 'Type_Struct').fields['StructField']
 
         # ----------------------------------------------------------------------
         # Creating the standard metadata
 
-        standard_metadata = P4Node({})
-        standard_metadata.node_type = 'header_instance'
-        standard_metadata.name = "standard_metadata"
-        standard_metadata.type = hlir16.standard_metadata_t
-        hlir16.standard_metadata_t.is_metadata = True
+        standard_metadata = P4Node({'node_type' : 'header_instance',
+                                    'name' : 'standard_metadata',
+                                    'type' : P4Node({'node_type' : 'Type_Name',
+                                                     'path' : P4Node({'node_type' : 'Path',
+                                                                      'name' : 'standard_metadata_t',
+                                                                      'absolute' : False})})})
         metadata_instances.append(standard_metadata)
-        metadata_types.append(hlir16.standard_metadata_t)
+        hlir16.header_instances = P4Node({'node_type' : 'header_instance_list'}, header_instances + metadata_instances)
+    else:
+        assert(False) #An unsupported P4 architecture is used!
 
+    # ----------------------------------------------------------------------
+    # Connecting instances with types
 
-        # ----------------------------------------------------------------------
-        # Writing the types and instances to hlir16
+    for h in header_instances:
+        h.type = hlir16.declarations.get(h.type.path.name, "Type_Header")
+    for h in metadata_instances:
+        h.type = hlir16.declarations.get(h.type.path.name, "Type_Struct")
 
-        hlir16.header_types.vec += metadata_types
+    # ----------------------------------------------------------------------
+    # Collecting header types
 
-        hlir16.header_instances = P4Node({}, header_instances + metadata_instances)
-        hlir16.header_instances.node_type = 'header_instance_list'
-
-    elif hlir16.p4v == 16:
-        hlir16.header_instances = hlir16.Parsed_packet.fields #['StructField']
-        hdrs  = [(False, hdr, hdr.name, hlir16.declarations.get(hdr.type.path.name, "Type_Header"), get_bit_width(hlir16, hdr)) for hdr in hlir16.headers]
-        # TODO add metadatas in P4-16
-        all_header_infos = hdrs
+    hlir16.header_types = P4Node({'node_type' : 'header_type_list'},
+                                 hlir16.declarations['Type_Header'] + [h.type for h in metadata_instances])
 
     for h in hlir16.header_types:
+        h.is_metadata = h.node_type != 'Type_Header'
         #h.size = type_bit_width(hlir16, h)
         h.id = 'header_'+h.name
         offset = 0
@@ -418,11 +402,16 @@ def set_additional_attrs(hlir16, nodes, p4_version):
         if type(node) is not P4Node:
             continue
         if node.node_type == 'Member':
-            if node.expr.node_type == 'PathExpression' and node.expr.path.name == 'hdr':
-                header_name = node.member
-                header = hlir16.header_instances.get(header_name)
-                if header is not None:
-                    node.ref = header
+            #Assuming the structure is <hlir16>.<declarations>.<control/parser>
+            parent = node.node_parents[0][2]
+            #Assuming control signatures starts with headers and the second parameter in parser signatures are headers
+            header_var_mapping = {'P4Control':0, 'P4Parser':1}
+            if parent.node_type in header_var_mapping:
+                header_var = parent.type.applyParams.parameters[header_var_mapping[parent.node_type]].name
+                if node.expr.node_type == 'PathExpression' and node.expr.path.name == header_var:
+                    header = hlir16.header_instances.get(node.member)
+                    if header is not None:
+                        node.ref = header
 
     # Field references
     for idx in hlir16.all_nodes:
