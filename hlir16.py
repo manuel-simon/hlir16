@@ -192,6 +192,31 @@ def paths_to(node, value, max_depth=20, path=[], root=None, max_length=70, print
     for attr in node.xdir():
         paths_to(getattr(node, attr), value, max_depth - 1, path + [attr], root, max_length, print_details, match)
 
+def get_children(node, f = lambda n: True, visited=[]):
+    if node in visited: return []
+
+    children = []
+    new_visited = visited + [node]
+    if f(node): children.append(node)
+
+    if type(node) is list:
+        for _, subnode in enumerate(node):
+            children.extend(get_children(subnode, f, new_visited))
+    elif type(node) is dict:
+        for key in node:
+            children.extend(get_children(node[key], f, new_visited))
+
+    if type(node) != P4Node:
+        return children
+
+    if node.is_vec():
+        for idx, _ in enumerate(node.vec):
+            children.extend(get_children(node[idx], f, new_visited))
+
+    for attr in node.xdir():
+        children.extend(get_children(getattr(node, attr), f, new_visited))
+
+    return children
 
 def set_additional_attrs(hlir16, nodes, p4_version):
 
@@ -233,8 +258,9 @@ def set_additional_attrs(hlir16, nodes, p4_version):
 
     package_instance = hlir16.declarations.by_type('Declaration_Instance')[0] #TODO: what to do when there are more than one instances
     package_name = package_instance.type.baseType.path.name
+    package_params = [hlir16.declarations.get(c.type.name) for c in package_instance.arguments]
 
-    if package_name == 'V1Switch':
+    if package_name == 'V1Switch': #v1model
         # ----------------------------------------------------------------------
         # Collecting header instances
 
@@ -394,47 +420,70 @@ def set_additional_attrs(hlir16, nodes, p4_version):
         table.key_length_bytes = bits_to_bytes(key_length)
 
     # --------------------------------------------------------------------------
-    # References in expressions
+    # Collect more information for packet_in method calls
 
-    # Header references
+    def resolve_header_ref(parser_or_control, member_expr):
+        return hlir16.declarations.get(parser_or_control.type.applyParams.parameters.get(member_expr.expr.path.name).type.path.name).\
+            fields.get(member_expr.member)
+
+    for block_node in hlir16.declarations['P4Parser']:
+        for block_param in block_node.type.applyParams.parameters:
+            if block_param.type.path.name == 'packet_in':
+                for node in get_children(block_node, lambda n: type(n) is P4Node and n.node_type == 'MethodCallStatement'):
+                    method = node.methodCall.method
+                    if method.node_type == 'Member' and method.expr.node_type == 'PathExpression' \
+                       and method.expr.path.name == block_param.name:
+                        if method.member == 'extract':
+                            assert(len(method.type.parameters.parameters) in {1, 2})
+                            arg0 = node.methodCall.arguments[0]
+                            node.call = 'extract_header'
+                            node.is_tmp = arg0.node_type == 'PathExpression'
+                            if node.is_tmp:
+                                node.header = block_node.parserLocals.get(arg0.path.name)
+                            else:
+                                node.header = resolve_header_ref(block_node, arg0)
+                            node.is_vw = len(method.type.parameters.parameters) == 2
+                            if node.is_vw:
+                                node.width = node.methodCall.arguments[1]
+                        elif method.member in {'lookahead', 'advance', 'length'}:
+                            addError('generating hlir16', 'packet_in.{} is not supported yet!'.format(method.member))
+                        else:
+                            assert(False) #The only possible method calls on packet_in are extract, lookahead, advance and length
+
+    # --------------------------------------------------------------------------
+    # Header references in expressions
+
+    if package_name == 'V1Switch': #v1model
+        architecture_headers_mapping = [1,0,0,0,0,1]
+    else:
+        architecture_headers_mapping = []
+        addError('generating hlir16', 'Package {} is not supported!'.format(package_name))
+    for headers_idx, block_node in zip(architecture_headers_mapping, package_params):
+        block_param_name = block_node.type.applyParams.parameters[headers_idx].name
+        for node in get_children(block_node, lambda n: type(n) is P4Node and n.node_type == 'Member'
+                                 and n.expr.node_type == 'PathExpression' and n.expr.path.name == block_param_name):
+            node.header_ref = resolve_header_ref(block_node, node)
+
+    # --------------------------------------------------------------------------
+    # Field references in expressions
+
+    for block_node in package_params:
+        for node in get_children(block_node, lambda n: type(n) is P4Node and n.node_type == 'Member'
+                                 and n.expr.node_type == 'Member' and hasattr(n.expr, 'header_ref')
+                                 and n.member in map(lambda m: m.name, n.expr.header_ref.type.fields)):
+            node.field_ref = node.expr.header_ref.type.fields.get(node.member)
+
+    # --------------------------------------------------------------------------
+    # Type references in expressions
+
     for idx in hlir16.all_nodes:
         node = hlir16.all_nodes[idx]
         if type(node) is not P4Node:
             continue
-        if node.node_type == 'Member':
-            #Assuming the structure is <hlir16>.<declarations>.<control/parser>
-            parent = node.node_parents[0][2]
-            #Assuming control signatures starts with headers and the second parameter in parser signatures are headers
-            header_var_mapping = {'P4Control':0, 'P4Parser':1}
-            if parent.node_type in header_var_mapping:
-                header_var = parent.type.applyParams.parameters[header_var_mapping[parent.node_type]].name
-                if node.expr.node_type == 'PathExpression' and node.expr.path.name == header_var:
-                    header = hlir16.header_instances.get(node.member)
-                    if header is not None:
-                        node.ref = header
-
-    # Field references
-    for idx in hlir16.all_nodes:
-        node = hlir16.all_nodes[idx]
-        if type(node) is not P4Node:
-            continue
-        if node.node_type == 'Member':
-            if node.expr.node_type == 'Member':
-                if hasattr(node.expr, 'ref') and node.expr.ref.node_type == 'StructField':
-                    field_name = node.member
-                    field = node.expr.ref.type.fields.get(field_name)
-                    if field is not None:
-                        node.ref = field
-
-    # Type references
-    for idx in hlir16.all_nodes:
-        node = hlir16.all_nodes[idx]
-        if type(node) is not P4Node:
-            continue
-        if node.node_type == 'Type_Name' and hasattr(node, 'path'):
+        if node.node_type == 'Type_Name':
             t = hlir16.declarations.get(node.path.name)
             if t is not None:
-                node.ref = t
+                node.type_ref = t
 
 def load_p4(filename, p4_version=None, p4c_path=None):
     """Returns either an error code (an int), or a P4Node object."""
