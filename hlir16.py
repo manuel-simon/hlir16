@@ -232,6 +232,7 @@ def set_additional_attrs(hlir16, nodes, p4_version):
 
     hlir16.all_nodes = nodes
     hlir16.p4v = p4_version
+    hlir16.sc_annotations = []
 
     for idx in hlir16.all_nodes:
         node = hlir16.all_nodes[idx]
@@ -246,6 +247,18 @@ def set_additional_attrs(hlir16, nodes, p4_version):
         node.set_attr('by_type',
             (lambda n: lambda typename: P4Node({}, [f for f in hlir16.declarations if f.node_type == typename or f.node_type == 'Type_' + typename]))(node),
         )
+        
+    # --------------------------------------------------------------------------
+    # Annotations (appearing in source code)
+
+    for idx in hlir16.all_nodes:
+        node = hlir16.all_nodes[idx]
+        if type(node) is not P4Node:
+            continue
+        if node.node_type == 'Annotations':
+            for annot in node.annotations:
+                if annot.name!="hidden" and annot.name!="name" and annot.name!="" :
+                    hlir16.sc_annotations.append(annot)
 
     # --------------------------------------------------------------------------
     # Structs
