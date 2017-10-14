@@ -17,33 +17,5 @@
 
 # TODO turn all content in here into attributes of P4Nodes?
 
-
-def get_bit_width(hlir16, node):
-    return type_bit_width(hlir16, get_type(hlir16, node))
-
-
-def type_bit_width(hlir16, p4type):
-    return sum([get_type(hlir16, hf).size for hf in p4type.fields])
-
-
-def get_type(hlir16, node):
-    if node.type.node_type == "Type_Bits":
-        return node.type
-
-    if node.type.node_type == "Type_Varbits":
-        return node.type
-
-    if node.type.node_type == "Type_Name":
-        htype_name = node.type.path.name
-
-        hdr = hlir16.declarations.get(htype_name, "Type_Header")
-        if hdr is not None:
-            return hdr
-
-        return hlir16.declarations.get(htype_name, "Type_Typedef").type
-
-    raise ValueError("Expected node that describes a type, got " + str(node))
-
-
 def bits_to_bytes(bit_size):
     return (bit_size + 7) / 8

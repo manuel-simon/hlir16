@@ -23,7 +23,7 @@ import re
 from p4node import P4Node
 
 from utils_hlir16 import *
-
+from utils.misc import addError
 
 def has_method(obj, method_name):
     return hasattr(obj, method_name) and callable(getattr(obj, method_name))
@@ -267,10 +267,50 @@ def set_additional_attrs(hlir16, nodes, p4_version):
         hlir16.set_attr(struct.name, struct)
 
     # --------------------------------------------------------------------------
+    # Resolve all Type_Name and Type_Typedef nodes to real type nodes
+
+    def resolve_type_name_node(type_name_node, parent):
+        if parent.node_type == 'P4Program':
+            return hlir16.declarations.get(type_name_node.path.name)
+        elif parent.node_type == 'ConstructorCallExpression' and parent.constructedType == type_name_node:
+            return parent.type
+        elif parent.node_type == 'TypeNameExpression' and parent.typeName == type_name_node:
+            return parent.type.type
+        elif hasattr(parent, 'typeParameters'):
+            type_param = parent.typeParameters.parameters.get(type_name_node.path.name)
+            if type_param is not None:
+                return type_param
+
+        return resolve_type_name_node(type_name_node, parent.node_parents[0][-1]);
+
+    def resolve_type_typedef_node(node):
+        return node.type if node.node_type == 'Type_Typedef' else node
+
+    for node in filter(lambda n : type(n) is P4Node and n.node_type == 'Type_Name',
+                       map(lambda idx : hlir16.all_nodes[idx], hlir16.all_nodes)):
+        for parent in map(lambda p: p[-1], node.node_parents):
+            type_updated = False
+            resolved_type = resolve_type_name_node(node, parent)
+            assert(resolved_type is not None) # All Type_Name nodes must be resolved to a real type node
+            resolved_type = resolve_type_typedef_node(resolved_type)
+
+            if parent.is_vec():
+                for idx, child in enumerate(parent.vec):
+                    if child == node:
+                        parent.vec[idx] = resolved_type
+                        type_updated = True
+            else:
+                for attr in {'type', 'typeName', 'baseType', 'constructedType', 'returnType'}:
+                    if hasattr(parent, attr) and parent.get_attr(attr) == node:
+                        parent.set_attr(attr, resolved_type)
+                        type_updated = True
+            assert(type_updated) # At least one child node must be updated
+
+    # --------------------------------------------------------------------------
     # Package and package instance
 
     package_instance = hlir16.declarations.by_type('Declaration_Instance')[0] #TODO: what to do when there are more than one instances
-    package_name = package_instance.type.baseType.path.name
+    package_name = package_instance.type.baseType.name
     package_params = [hlir16.declarations.get(c.type.name) for c in package_instance.arguments]
 
     if package_name == 'V1Switch': #v1model
@@ -278,30 +318,19 @@ def set_additional_attrs(hlir16, nodes, p4_version):
         # Collecting header instances
 
         #TODO: is there always a struct containing all headers?
-        header_instances = hlir16.declarations.get(package_instance.type.arguments[0].path.name, 'Type_Struct').fields['StructField']
-        metadata_instances = hlir16.declarations.get(package_instance.type.arguments[1].path.name, 'Type_Struct').fields['StructField']
+        header_instances = hlir16.declarations.get(package_instance.type.arguments[0].name, 'Type_Struct').fields['StructField']
+        metadata_instances = hlir16.declarations.get(package_instance.type.arguments[1].name, 'Type_Struct').fields['StructField']
 
         # ----------------------------------------------------------------------
         # Creating the standard metadata
 
         standard_metadata = P4Node({'node_type' : 'header_instance',
                                     'name' : 'standard_metadata',
-                                    'type' : P4Node({'node_type' : 'Type_Name',
-                                                     'path' : P4Node({'node_type' : 'Path',
-                                                                      'name' : 'standard_metadata_t',
-                                                                      'absolute' : False})})})
+                                    'type' : hlir16.declarations.get('standard_metadata_t')})
         metadata_instances.append(standard_metadata)
         hlir16.header_instances = P4Node({'node_type' : 'header_instance_list'}, header_instances + metadata_instances)
     else:
         assert(False) #An unsupported P4 architecture is used!
-
-    # ----------------------------------------------------------------------
-    # Connecting instances with types
-
-    for h in header_instances:
-        h.type = hlir16.declarations.get(h.type.path.name, "Type_Header")
-    for h in metadata_instances:
-        h.type = hlir16.declarations.get(h.type.path.name, "Type_Struct")
 
     # ----------------------------------------------------------------------
     # Collecting header types
@@ -311,21 +340,17 @@ def set_additional_attrs(hlir16, nodes, p4_version):
 
     for h in hlir16.header_types:
         h.is_metadata = h.node_type != 'Type_Header'
-        #h.size = type_bit_width(hlir16, h)
         h.id = 'header_'+h.name
         offset = 0
-        h.bit_width   = sum([get_type(hlir16, f).size for f in h.fields])
+        h.bit_width   = sum([f.type.size for f in h.fields])
         h.byte_width  = bits_to_bytes(h.bit_width)
         is_vw = False
         for f in h.fields:
             f.id = 'field_' + h.name + '_' + f.name # TODO
             # TODO bit_offset, byte_offset, mask
             f.offset = offset
-            size = f.type.get_attr('size')
-            if size is None:
-                size = get_type(hlir16, f).size / 8
-            f.size = size
-            offset += size
+            f.size = f.type.size
+            offset += f.size
             f.is_vw = (f.type.node_type == 'Type_Varbits') # 'Type_Bits' vs. 'Type_Varbits'
             is_vw |= f.is_vw
             f.preparsed = False #f.name == 'ttl'
@@ -425,7 +450,7 @@ def set_additional_attrs(hlir16, nodes, p4_version):
 
                 if size is None:
                     kfld = k.header.type.fields.get(k.field_name)
-                    k.width = get_type(hlir16, kfld).size
+                    k.width = kfld.type.size
                 else:
                     k.width = size
                 key_length += k.width
@@ -436,12 +461,12 @@ def set_additional_attrs(hlir16, nodes, p4_version):
     # Collect more information for packet_in method calls
 
     def resolve_header_ref(parser_or_control, member_expr):
-        return hlir16.declarations.get(parser_or_control.type.applyParams.parameters.get(member_expr.expr.path.name).type.path.name).\
+        return hlir16.declarations.get(parser_or_control.type.applyParams.parameters.get(member_expr.expr.path.name).type.name).\
             fields.get(member_expr.member)
 
     for block_node in hlir16.declarations['P4Parser']:
         for block_param in block_node.type.applyParams.parameters:
-            if block_param.type.path.name == 'packet_in':
+            if block_param.type.name == 'packet_in':
                 for node in get_children(block_node, lambda n: type(n) is P4Node and n.node_type == 'MethodCallStatement'):
                     method = node.methodCall.method
                     if method.node_type == 'Member' and method.expr.node_type == 'PathExpression' \
@@ -485,18 +510,6 @@ def set_additional_attrs(hlir16, nodes, p4_version):
                                  and n.expr.node_type == 'Member' and hasattr(n.expr, 'header_ref')
                                  and n.member in map(lambda m: m.name, n.expr.header_ref.type.fields)):
             node.field_ref = node.expr.header_ref.type.fields.get(node.member)
-
-    # --------------------------------------------------------------------------
-    # Type references in expressions
-
-    for idx in hlir16.all_nodes:
-        node = hlir16.all_nodes[idx]
-        if type(node) is not P4Node:
-            continue
-        if node.node_type == 'Type_Name':
-            t = hlir16.declarations.get(node.path.name)
-            if t is not None:
-                node.type_ref = t
 
 def load_p4(filename, p4_version=None, p4c_path=None):
     """Returns either an error code (an int), or a P4Node object."""
