@@ -307,6 +307,51 @@ def set_additional_attrs(hlir16, nodes, p4_version):
             assert(type_updated) # At least one child node must be updated
 
     # --------------------------------------------------------------------------
+    # Resolve all PathExpression nodes
+
+    def resolve_path_expression_node(path_node, parent):
+        resolve_lists = []
+        if parent.node_type == 'P4Program':
+            return hlir16.declarations.get(path_node.path.name)
+        elif parent.node_type == 'KeyElement' and parent.matchType == path_node:
+            return [mk for mks in hlir16.declarations.by_type('Declaration_MatchKind')
+                    for mk in mks.members if mk.name == path_node.path.name][0]
+        elif parent.node_type == 'P4Parser':
+            resolve_lists.extend([parent.type.applyParams.parameters, parent.parserLocals, parent.states])
+        elif parent.node_type == 'P4Control':
+            resolve_lists.extend([parent.type.applyParams.parameters, parent.controlLocals])
+        elif parent.node_type == 'P4Action':
+            resolve_lists.append(parent.parameters.parameters)
+        elif parent.node_type == 'Type_Header':
+            resolve_lists.append(parent.fields)
+
+        for resolve_list in resolve_lists:
+            tmp_resolved = resolve_list.get(path_node.path.name)
+            if tmp_resolved is not None:
+                return tmp_resolved
+
+        return resolve_path_expression_node(path_node, parent.node_parents[0][-1])
+
+    for node in filter(lambda n : type(n) is P4Node and n.node_type == 'PathExpression',
+                       map(lambda idx : hlir16.all_nodes[idx], hlir16.all_nodes)):
+        for parent in map(lambda p: p[-1], node.node_parents):
+            resolved_path = resolve_path_expression_node(node, parent)
+            assert(resolved_path is not None) # All PathExpression nodes must be resolved
+
+            path_updated = False
+            if parent.is_vec():
+                for idx, child in enumerate(parent.vec):
+                    if child == node:
+                        parent.vec[idx] = resolved_path
+                        path_updated = True
+            else:
+                for attr in parent.xdir():
+                    if parent.get_attr(attr) == node:
+                        parent.set_attr(attr, resolved_path)
+                        path_updated = True
+            assert(path_updated) # At least one child node must be updated
+
+    # --------------------------------------------------------------------------
     # Package and package instance
 
     package_instance = hlir16.declarations.by_type('Declaration_Instance')[0] #TODO: what to do when there are more than one instances
@@ -318,8 +363,8 @@ def set_additional_attrs(hlir16, nodes, p4_version):
         # Collecting header instances
 
         #TODO: is there always a struct containing all headers?
-        header_instances = hlir16.declarations.get(package_instance.type.arguments[0].name, 'Type_Struct').fields['StructField']
-        metadata_instances = hlir16.declarations.get(package_instance.type.arguments[1].name, 'Type_Struct').fields['StructField']
+        header_instances = package_instance.type.arguments[0].fields['StructField']
+        metadata_instances = package_instance.type.arguments[1].fields['StructField']
 
         # ----------------------------------------------------------------------
         # Creating the standard metadata
@@ -358,22 +403,6 @@ def set_additional_attrs(hlir16, nodes, p4_version):
 
     for hdr in hlir16.header_instances:
         hdr.id = re.sub(r'\[([0-9]+)\]', r'_\1', "header_instance_"+hdr.name)
-        def resolve_field_refs(n):
-            if n is not None and isinstance(n, P4Node):
-                if n.node_type == 'Path': # let's suppose it's a field name and cheat the further phases
-                    fn = n.name
-                    n.name = '(GET_INT32_AUTO_PACKET(pd,' + hdr.id + ', field_' + fn + '))'
-                else:
-                    ns = map(lambda l: n.get_attr(l), n.xdir())
-                    for n in ns:
-                        resolve_field_refs(n)
-        if hdr.type.is_vw:
-            for f in hdr.type.fields:
-                if f.is_vw:
-                    len_expr = f.annotations.annotations[0].expr[0]
-                    len_expr = len_expr.left.left # ignoring `* 8 - <length of the rest of fields>`
-                    resolve_field_refs(len_expr)
-                    hdr.length = len_expr
 
     # --------------------------------------------------------------------------
     # Controls and tables
@@ -398,7 +427,7 @@ def set_additional_attrs(hlir16, nodes, p4_version):
         for t in c.tables:
             table_actions = []
             for a in t.actions.actionList:
-                a.action_object = c.controlLocals.get(a.expression.method.path.name, 'P4Action')
+                a.action_object = a.expression.method
                 table_actions.append(a)
             t.actions = table_actions
 
@@ -407,7 +436,7 @@ def set_additional_attrs(hlir16, nodes, p4_version):
         lpm = 0
         ternary = 0
         for k in table.key.keyElements:
-            mt = k.matchType.path.name
+            mt = k.matchType.name
             if mt == 'ternary':
                 ternary = 1
             elif mt == 'lpm':
@@ -430,14 +459,14 @@ def set_additional_attrs(hlir16, nodes, p4_version):
                 continue
 
             # supposing that k.expression is of form '<header_name>.<name>'
-            if expr.node_type == 'PathExpression':
-                k.header_name = expr.path.name
+            if expr.node_type == 'Parameter':
+                k.header_name = expr.name
                 k.field_name = k.expression.member
             # supposing that k.expression is of form 'hdr.<header_name>.<name>'
             elif expr.node_type == 'Member':
                 k.header_name = expr.member
                 k.field_name = k.expression.member
-            k.match_type = k.matchType.path.name
+            k.match_type = k.matchType.name
             k.id = 'field_instance_' + k.header_name + '_' + k.field_name
 
             k.header = hlir16.header_instances.get(k.header_name)
@@ -461,23 +490,22 @@ def set_additional_attrs(hlir16, nodes, p4_version):
     # Collect more information for packet_in method calls
 
     def resolve_header_ref(parser_or_control, member_expr):
-        return hlir16.declarations.get(parser_or_control.type.applyParams.parameters.get(member_expr.expr.path.name).type.name).\
-            fields.get(member_expr.member)
+        return member_expr.expr.type.fields.get(member_expr.member)
 
     for block_node in hlir16.declarations['P4Parser']:
         for block_param in block_node.type.applyParams.parameters:
             if block_param.type.name == 'packet_in':
                 for node in get_children(block_node, lambda n: type(n) is P4Node and n.node_type == 'MethodCallStatement'):
                     method = node.methodCall.method
-                    if method.node_type == 'Member' and method.expr.node_type == 'PathExpression' \
-                       and method.expr.path.name == block_param.name:
+                    if method.node_type == 'Member' and method.expr.node_type == 'Parameter' \
+                       and method.expr.name == block_param.name:
                         if method.member == 'extract':
                             assert(len(method.type.parameters.parameters) in {1, 2})
                             arg0 = node.methodCall.arguments[0]
                             node.call = 'extract_header'
-                            node.is_tmp = arg0.node_type == 'PathExpression'
+                            node.is_tmp = arg0.node_type == 'Declaration_Variable'
                             if node.is_tmp:
-                                node.header = block_node.parserLocals.get(arg0.path.name)
+                                node.header = arg0
                             else:
                                 node.header = resolve_header_ref(block_node, arg0)
                             node.is_vw = len(method.type.parameters.parameters) == 2
@@ -499,7 +527,7 @@ def set_additional_attrs(hlir16, nodes, p4_version):
     for headers_idx, block_node in zip(architecture_headers_mapping, package_params):
         block_param_name = block_node.type.applyParams.parameters[headers_idx].name
         for node in get_children(block_node, lambda n: type(n) is P4Node and n.node_type == 'Member'
-                                 and n.expr.node_type == 'PathExpression' and n.expr.path.name == block_param_name):
+                                 and n.expr.node_type == 'Parameter' and n.expr.name == block_param_name):
             node.header_ref = resolve_header_ref(block_node, node)
 
     # --------------------------------------------------------------------------
