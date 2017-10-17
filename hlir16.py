@@ -373,6 +373,11 @@ def set_additional_attrs(hlir16, nodes, p4_version):
     package_name = package_instance.type.baseType.name
     package_params = [hlir16.declarations.get(c.type.name) for c in package_instance.arguments]
 
+    def gen_metadata_instance_node(iname, tname):
+        return P4Node({'node_type' : 'header_instance',
+                       'name' : iname,
+                       'type' : hlir16.declarations.get(tname)})
+
     if package_name == 'V1Switch': #v1model
         # ----------------------------------------------------------------------
         # Collecting header instances
@@ -388,9 +393,14 @@ def set_additional_attrs(hlir16, nodes, p4_version):
                                     'name' : 'standard_metadata',
                                     'type' : hlir16.declarations.get('standard_metadata_t')})
         metadata_instances.append(standard_metadata)
-        hlir16.header_instances = P4Node({'node_type' : 'header_instance_list'}, header_instances + metadata_instances)
+    elif package_name == 'VSS': #very_simple_model
+        header_instances = package_instance.type.arguments[0].fields['StructField']
+        metadata_instances = [gen_metadata_instance_node('in_control', 'InControl'),
+                              gen_metadata_instance_node('out_control', 'OutControl')]
     else:
         assert(False) #An unsupported P4 architecture is used!
+
+    hlir16.header_instances = P4Node({'node_type' : 'header_instance_list'}, header_instances + metadata_instances)
 
     # ----------------------------------------------------------------------
     # Collecting header types
@@ -536,6 +546,8 @@ def set_additional_attrs(hlir16, nodes, p4_version):
 
     if package_name == 'V1Switch': #v1model
         architecture_headers_mapping = [1,0,0,0,0,1]
+    elif package_name == 'VSS': #very_simple_model
+        architecture_headers_mapping = [1,0,0]
     else:
         architecture_headers_mapping = []
         addError('generating hlir16', 'Package {} is not supported!'.format(package_name))
