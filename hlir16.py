@@ -352,6 +352,21 @@ def set_additional_attrs(hlir16, nodes, p4_version):
             assert(path_updated) # At least one child node must be updated
 
     # --------------------------------------------------------------------------
+    # Add naming information to nodes
+
+    for enum in hlir16.declarations.by_type('Type_Enum'):
+        enum.c_name = 'enum_' + enum.name
+        for member in enum.members:
+            member.c_name = enum.c_name + '_' + member.name
+
+    for error in hlir16.declarations.by_type('Type_Error'):
+        error.c_name = 'error_' + error.name
+        for member in error.members:
+            member.c_name = error.c_name + '_' + member.name
+
+    #import sys; sys.exit(77)
+
+    # --------------------------------------------------------------------------
     # Package and package instance
 
     package_instance = hlir16.declarations.by_type('Declaration_Instance')[0] #TODO: what to do when there are more than one instances
