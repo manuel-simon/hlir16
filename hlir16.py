@@ -256,9 +256,7 @@ def set_additional_attrs(hlir16, nodes, p4_version):
         if type(node) is not P4Node:
             continue
         if node.node_type == 'Annotations':
-            for annot in node.annotations:
-                if annot.name!="hidden" and annot.name!="name" and annot.name!="" :
-                    hlir16.sc_annotations.append(annot)
+            hlir16.sc_annotations.extend([annot for annot in node.annotations if annot.name!="hidden" and annot.name!="name" and annot.name!=""])
 
     # --------------------------------------------------------------------------
     # Structs
