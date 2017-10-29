@@ -508,6 +508,10 @@ def set_additional_attrs(hlir16, nodes, p4_version):
 
     if package_name == 'V1Switch': #v1model
         architecture_headers_mapping = [1,0,0,0,0,1]
+        for node in filter(lambda n : type(n) is P4Node and n.node_type == 'Member' and n.expr.node_type == 'PathExpression'
+                           and n.expr.path.name == 'standard_metadata',
+                           [hlir16.all_nodes[idx] for idx in hlir16.all_nodes]):
+            node.expr.header_ref = hlir16.header_instances.get(node.expr.ref.name)
     elif package_name == 'VSS': #very_simple_model
         architecture_headers_mapping = [1,0,0]
     else:
@@ -524,7 +528,7 @@ def set_additional_attrs(hlir16, nodes, p4_version):
 
     for block_node in package_params:
         for node in get_children(block_node, lambda n: type(n) is P4Node and n.node_type == 'Member'
-                                 and n.expr.node_type == 'Member' and hasattr(n.expr, 'header_ref')
+                                 and hasattr(n.expr, 'header_ref')
                                  and n.member in map(lambda m: m.name, n.expr.header_ref.type.type_ref.fields)):
             node.field_ref = node.expr.header_ref.type.type_ref.fields.get(node.member)
 
