@@ -224,8 +224,9 @@ def set_additional_attrs(hlir16, nodes, p4_version):
     # Common
 
     hlir16.define_common_attrs([
-        "all_nodes",
-        "p4v",
+        'all_nodes',
+        'all_nodes_by_type',
+        'p4v',
         'paths_to',
         'by_type',
     ]),
@@ -233,6 +234,8 @@ def set_additional_attrs(hlir16, nodes, p4_version):
     hlir16.all_nodes = nodes
     hlir16.p4v = p4_version
     hlir16.sc_annotations = []
+    hlir16.all_nodes_by_type = (lambda t: filter(lambda n : type(n) is P4Node and n.node_type == t,
+                                                 [hlir16.all_nodes[idx] for idx in hlir16.all_nodes]))
 
     for idx in hlir16.all_nodes:
         node = hlir16.all_nodes[idx]
@@ -251,12 +254,8 @@ def set_additional_attrs(hlir16, nodes, p4_version):
     # --------------------------------------------------------------------------
     # Annotations (appearing in source code)
 
-    for idx in hlir16.all_nodes:
-        node = hlir16.all_nodes[idx]
-        if type(node) is not P4Node:
-            continue
-        if node.node_type == 'Annotations':
-            hlir16.sc_annotations.extend([annot for annot in node.annotations if annot.name!="hidden" and annot.name!="name" and annot.name!=""])
+    for node in hlir16.all_nodes_by_type('Annotations'):
+        hlir16.sc_annotations.extend([annot for annot in node.annotations if annot.name!="hidden" and annot.name!="name" and annot.name!=""])
 
     # --------------------------------------------------------------------------
     # Structs
@@ -281,7 +280,7 @@ def set_additional_attrs(hlir16, nodes, p4_version):
 
         return resolve_type_name_node(type_name_node, parent.node_parents[0][-1]);
 
-    for node in filter(lambda n : type(n) is P4Node and n.node_type == 'Type_Name', [hlir16.all_nodes[idx] for idx in hlir16.all_nodes]):
+    for node in hlir16.all_nodes_by_type('Type_Name'):
         resolved_type = resolve_type_name_node(node, node)
         assert(resolved_type is not None) # All Type_Name nodes must be resolved to a real type node
         node.type_ref = resolved_type
@@ -312,8 +311,7 @@ def set_additional_attrs(hlir16, nodes, p4_version):
 
         return resolve_path_expression_node(path_node, parent.node_parents[0][-1])
 
-    for node in filter(lambda n : type(n) is P4Node and n.node_type == 'PathExpression',
-                       [hlir16.all_nodes[idx] for idx in hlir16.all_nodes]):
+    for node in hlir16.all_nodes_by_type('PathExpression'):
             resolved_path = resolve_path_expression_node(node, node)
             assert(resolved_path is not None) # All PathExpression nodes must be resolved
             node.ref = resolved_path
@@ -359,8 +357,8 @@ def set_additional_attrs(hlir16, nodes, p4_version):
         header_instances = package_instance.type.arguments[0].fields['StructField']
         metadata_instances = [gen_metadata_instance_node('in_control', 'InControl'),
                               gen_metadata_instance_node('out_control', 'OutControl')]
-    else:
-        assert(False) #An unsupported P4 architecture is used!
+    else: #An unsupported P4 architecture is used! (All architecture dependent code should be removed from hlir16!)
+        addError('generating hlir16', 'Package {} is not supported!'.format(package_name))
 
     hlir16.header_instances = P4Node({'node_type' : 'header_instance_list'}, header_instances + metadata_instances)
 
@@ -506,31 +504,24 @@ def set_additional_attrs(hlir16, nodes, p4_version):
     # --------------------------------------------------------------------------
     # Header references in expressions
 
-    if package_name == 'V1Switch': #v1model
-        architecture_headers_mapping = [1,0,0,0,0,1]
-        for node in filter(lambda n : type(n) is P4Node and n.node_type == 'Member' and n.expr.node_type == 'PathExpression'
-                           and n.expr.path.name == 'standard_metadata',
-                           [hlir16.all_nodes[idx] for idx in hlir16.all_nodes]):
-            node.expr.header_ref = hlir16.header_instances.get(node.expr.ref.name)
-    elif package_name == 'VSS': #very_simple_model
-        architecture_headers_mapping = [1,0,0]
-    else:
-        architecture_headers_mapping = []
-        addError('generating hlir16', 'Package {} is not supported!'.format(package_name))
-    for headers_idx, block_node in zip(architecture_headers_mapping, package_params):
-        block_param_name = block_node.type.applyParams.parameters[headers_idx].name
-        for node in get_children(block_node, lambda n: type(n) is P4Node and n.node_type == 'Member'
-                                 and n.expr.node_type == 'PathExpression' and n.expr.ref.name == block_param_name):
-            node.header_ref = resolve_header_ref(node)
+    for member in hlir16.all_nodes_by_type('Member'):
+        if member.expr.node_type != 'PathExpression' or member.expr.ref.node_type != 'Parameter'\
+           or member.expr.ref.type.type_ref.node_type != 'Type_Struct':
+            continue
+        if member.expr.ref.type.type_ref in hlir16.header_types:
+            member.expr.header_ref = hlir16.header_instances.get(member.expr.ref.name)
+        elif member.expr.ref.type.type_ref.fields.get(member.member).type.type_ref in hlir16.header_types:
+            member.header_ref = resolve_header_ref(member)
+        else:
+            addError('generating hlir16', 'Unable to resolve header reference: {}'.format(member))
 
     # --------------------------------------------------------------------------
     # Field references in expressions
 
-    for block_node in package_params:
-        for node in get_children(block_node, lambda n: type(n) is P4Node and n.node_type == 'Member'
-                                 and hasattr(n.expr, 'header_ref')
-                                 and n.member in map(lambda m: m.name, n.expr.header_ref.type.type_ref.fields)):
-            node.field_ref = node.expr.header_ref.type.type_ref.fields.get(node.member)
+    for member in hlir16.all_nodes_by_type('Member'):
+        if not hasattr(member.expr, 'header_ref') or member.expr.header_ref.type.type_ref.fields.get(member.member) == None:
+            continue
+        member.field_ref = member.expr.header_ref.type.type_ref.fields.get(member.member)
 
 def load_p4(filename, p4_version=None, p4c_path=None):
     """Returns either an error code (an int), or a P4Node object."""
