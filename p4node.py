@@ -144,3 +144,23 @@ class P4Node(object):
         """A convenient way to get the element with the given name (and type, if given) in a vector."""
         potentials = [elem for elem in self.vec if elem.get_attr('name') == name and (type_name == None or elem.node_type == type_name)]
         return potentials[0] if len(potentials) == 1 else None
+
+def deep_copy(node, seen_ids = []):
+    new_p4node = P4Node({})
+
+    if node.id in seen_ids :
+        addError('transforming hlir16', 'Recursion found during deep-copy')
+
+    for c in node.__dict__ :
+	if not (c in node.xdir()) and not c.startswith("__") : new_p4node.set_attr(c, node.get_attr(c))
+
+    if node.is_vec() :
+	    new_p4node.set_vec([deep_copy(elem, seen_ids + [node.id]) for elem in node.vec])
+
+    for d in node.xdir() :
+	if type(node.get_attr(d)) == P4Node and not (d in ['ref', 'type_ref', 'header_ref', 'field_ref', 'control']):
+	    new_p4node.set_attr(d, deep_copy(node.get_attr(d), seen_ids + [node.id]))
+        else :
+	    new_p4node.set_attr(d, node.get_attr(d))
+
+    return new_p4node
