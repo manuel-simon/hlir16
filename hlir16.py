@@ -20,7 +20,7 @@ import subprocess
 import os
 import tempfile
 import re
-from p4node import P4Node
+from p4node import P4Node, get_fresh_node_id
 
 from utils_hlir16 import *
 from utils.misc import addError
@@ -337,10 +337,13 @@ def set_additional_attrs(hlir16, nodes, p4_version):
     package_params = [hlir16.declarations.get(c.type.name) for c in package_instance.arguments]
 
     def gen_metadata_instance_node(iname, tname):
-        return P4Node({'node_type' : 'header_instance',
+        return P4Node({'id' : get_fresh_node_id(),
+                       'node_type' : 'header_instance',
                        'name' : iname,
-                       'type' : P4Node({'node_type' : 'Type_Name',
-                                        'path' : P4Node({'node_type' : 'Path',
+                       'type' : P4Node({'id' : get_fresh_node_id(),
+                                        'node_type' : 'Type_Name',
+                                        'path' : P4Node({'id' : get_fresh_node_id(),
+                                                         'node_type' : 'Path',
                                                          'name' : tname,
                                                          'absolute' : False}),
                                         'type_ref' : hlir16.declarations.get(tname)})})
@@ -360,12 +363,12 @@ def set_additional_attrs(hlir16, nodes, p4_version):
     else: #An unsupported P4 architecture is used! (All architecture dependent code should be removed from hlir16!)
         addError('generating hlir16', 'Package {} is not supported!'.format(package_name))
 
-    hlir16.header_instances = P4Node({'node_type' : 'header_instance_list'}, header_instances + metadata_instances)
+    hlir16.header_instances = P4Node({'id' : get_fresh_node_id(), 'node_type' : 'header_instance_list'}, header_instances + metadata_instances)
 
     # ----------------------------------------------------------------------
     # Collecting header types
 
-    hlir16.header_types = P4Node({'node_type' : 'header_type_list'},
+    hlir16.header_types = P4Node({'id' : get_fresh_node_id(), 'node_type' : 'header_type_list'},
                                  hlir16.declarations['Type_Header'] + [h.type.type_ref for h in metadata_instances])
 
     for h in hlir16.header_types:

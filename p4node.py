@@ -17,6 +17,11 @@
 
 extra_node_id = -1000
 
+def get_fresh_node_id() :
+    global extra_node_id
+    extra_node_id -= 1
+    return extra_node_id
+
 p4node_last_failure      = None
 p4node_last_failure_path = []
 
@@ -52,9 +57,7 @@ class P4Node(object):
     def __init__(self, dict, vec=None):
         self.__dict__ = dict
         if 'Node_ID' not in dict:
-            global extra_node_id
-            self.Node_ID = extra_node_id
-            extra_node_id -= 1
+            self.Node_ID = get_fresh_node_id()
         self._data = {}
         self.vec = vec
 
