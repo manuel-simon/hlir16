@@ -218,6 +218,16 @@ def get_children(node, f = lambda n: True, visited=[]):
 
     return children
 
+# TODO remove this; instead:
+# TODO in set_additional_attrs, replace all type references with the referenced types
+def resolve_typeref(hlir16, f):
+    # resolving type reference
+    if f.type.node_type == 'Type_Name':
+        tref = f.type.type_ref
+        return hlir16.declarations.get(tref.name)
+    else:
+        return f
+
 def set_additional_attrs(hlir16, nodes, p4_version):
 
     # --------------------------------------------------------------------------
@@ -375,10 +385,13 @@ def set_additional_attrs(hlir16, nodes, p4_version):
         h.is_metadata = h.node_type != 'Type_Header'
         h.id = 'header_'+h.name
         offset = 0
-        h.bit_width   = sum([f.type.size for f in h.fields])
+
+        h.bit_width   = sum([resolve_typeref(hlir16, f).type.size for f in h.fields])
         h.byte_width  = bits_to_bytes(h.bit_width)
         is_vw = False
         for f in h.fields:
+            f = resolve_typeref(hlir16, f)
+
             f.id = 'field_' + h.name + '_' + f.name # TODO
             # TODO bit_offset, byte_offset, mask
             f.offset = offset
@@ -404,7 +417,13 @@ def set_additional_attrs(hlir16, nodes, p4_version):
             t.control = c
         c.actions = c.controlLocals['P4Action']
 
-    hlir16.tables = [t for c in hlir16.controls for t in c.tables]
+
+
+    main = hlir16.declarations['Declaration_Instance'][0] # TODO what if there are more package instances?
+    pipeline_elements = main.arguments
+    ctrls = [hlir16.declarations.get(pe.type.name, 'P4Control') for pe in pipeline_elements]
+
+    hlir16.tables = [table for ctrl in ctrls if ctrl is not None for table in ctrl.controlLocals['P4Table']]
 
     for table in hlir16.tables:
         for prop in table.properties.properties:
@@ -421,26 +440,32 @@ def set_additional_attrs(hlir16, nodes, p4_version):
 
     # TODO this shall be calculated in the HAL
     def match_type(table):
-        lpm = 0
-        ternary = 0
-        for k in table.key.keyElements:
-            mt = k.matchType.ref.name
-            if mt == 'ternary':
-                ternary = 1
-            elif mt == 'lpm':
-                lpm += 1
-        if ternary or lpm > 1: return 'TERNARY'
-        elif lpm:              return 'LPM'
-        else:                  return 'EXACT'
+        match_types = [k.matchType.ref.name for k in table.key.keyElements]
+
+        if 'ternary' in match_types:
+            return 'TERNARY'
+
+        lpm_count = match_types.count('lpm')
+
+        if lpm_count  > 1: return 'TERNARY'
+        if lpm_count == 1: return 'LPM'
+        if lpm_count == 0: return 'EXACT'
 
     # some tables do not have a key (e.g. 'tbl_act*'), we do not want to deal with them for now
-    hlir16.tables[:] = [table for table in hlir16.tables if hasattr(table, 'key')]
+    # hlir16.tables[:] = [table for table in hlir16.tables if hasattr(table, 'key')]
+
+    header_builtins = ["isValid", "setValid", "setInvalid"]
 
     for table in hlir16.tables:
+        if not hasattr(table, 'key'):
+            continue
+
         table.match_type = match_type(table)
         key_length = 0
 
         for k in table.key.keyElements:
+            k.match_type = k.matchType.ref.name
+
             expr = k.expression.get_attr('expr')
             if expr is None:
                 key_length += k.expression.type.size
@@ -466,7 +491,7 @@ def set_additional_attrs(hlir16, nodes, p4_version):
                 size = k.get_attr('size')
 
                 if size is None:
-                    kfld = k.header.type.type_ref.fields.get(k.field_name)
+                    kfld = resolve_typeref(hlir16, k.header.type.type_ref.fields.get(k.field_name))
                     k.width = kfld.type.size
                 else:
                     k.width = size
@@ -525,6 +550,7 @@ def set_additional_attrs(hlir16, nodes, p4_version):
         if not hasattr(member.expr, 'header_ref') or member.expr.header_ref.type.type_ref.fields.get(member.member) == None:
             continue
         member.field_ref = member.expr.header_ref.type.type_ref.fields.get(member.member)
+
 
 def load_p4(filename, p4_version=None, p4c_path=None):
     """Returns either an error code (an int), or a P4Node object."""
