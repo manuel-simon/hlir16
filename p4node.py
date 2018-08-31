@@ -52,6 +52,13 @@ class P4Node(object):
         "get",
         "str",
         "id",
+
+        # TODO remove these after fixing set_top_level_attrs
+        'all_nodes',
+        'all_nodes_by_type',
+        'p4v',
+        'paths_to',
+        'by_type',
     }
 
     def __init__(self, dict, vec=None):
@@ -109,7 +116,8 @@ class P4Node(object):
         """Sets an attribute of the object."""
         self.__dict__[key] = value
 
-    def define_common_attrs(self, attr_names):
+    @staticmethod
+    def define_common_attrs(attr_names):
         """The attribute names in the list will not be listed
         by the str and xdir operations."""
         for attr_name in attr_names:
