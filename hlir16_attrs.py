@@ -421,8 +421,7 @@ def get_children(node, f = lambda n: True, visited=[]):
 
 
 def find_extract_nodes(hlir16):
-    # --------------------------------------------------------------------------
-    # Collect more information for packet_in method calls
+    """Collect more information for packet_in method calls"""
 
     for block_node in hlir16.declarations['P4Parser']:
         for block_param in block_node.type.applyParams.parameters:
@@ -432,6 +431,11 @@ def find_extract_nodes(hlir16):
             # TODO step takes too long, as it iterates through all children
             for node in get_children(block_node, lambda n: type(n) is P4Node and n.node_type == 'MethodCallStatement'):
                 method = node.methodCall.method
+                if not hasattr(method.expr, 'ref'):
+                    # TODO investigate this case further
+                    # TODO happens in test-checksum
+                    continue
+                    
                 if (method.node_type, method.expr.node_type, method.expr.ref.name) != ('Member', 'PathExpression', block_param.name):
                     continue
 
