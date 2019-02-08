@@ -148,9 +148,10 @@ class P4Node(object):
     def str(self, show_name=True, show_type=True, show_funs=True):
         return P4Node.__str__(self, show_name, show_type, show_funs)
 
-    def get(self, name, type_name=None):
-        """A convenient way to get the element with the given name (and type, if given) in a vector."""
-        potentials = [elem for elem in self.vec if elem.get_attr('name') == name and (type_name == None or elem.node_type == type_name)]
+    def get(self, name, type_name=None, cond=lambda elem: True):
+        """A convenient way to get the element with the given name (and type, if given) in a vector.
+        A predicate that takes the element as a parameter can also be specified."""
+        potentials = [elem for elem in self.vec if elem.get_attr('name') == name and (type_name == None or elem.node_type == type_name) if cond(elem)]
         return potentials[0] if len(potentials) == 1 else None
 
 def deep_copy(node, seen_ids = []):
