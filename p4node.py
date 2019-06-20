@@ -17,7 +17,7 @@
 
 extra_node_id = -1000
 
-def get_fresh_node_id() :
+def get_fresh_node_id():
     global extra_node_id
     extra_node_id -= 1
     return extra_node_id
@@ -131,6 +131,7 @@ class P4Node(object):
             if p4node_last_failure is None:
                 p4node_last_failure = self
             p4node_last_failure_path.append(key)
+            # raise Exception('abc ' + str(self))
             return None
         return self.__dict__[key]
 
@@ -154,22 +155,23 @@ class P4Node(object):
         potentials = [elem for elem in self.vec if elem.get_attr('name') == name and (type_name == None or elem.node_type == type_name) if cond(elem)]
         return potentials[0] if len(potentials) == 1 else None
 
-def deep_copy(node, seen_ids = []):
+
+def deep_copy(node, seen_ids = [], on_error = lambda x: None):
     new_p4node = P4Node({})
 
-    if node.id in seen_ids :
-        addError('transforming hlir16', 'Recursion found during deep-copy')
+    if node.id in seen_ids:
+        on_error(node.id)
 
-    for c in node.__dict__ :
-	if not (c in node.xdir()) and not c.startswith("__") : new_p4node.set_attr(c, node.get_attr(c))
+    for c in node.__dict__:
+        if not (c in node.xdir()) and not c.startswith("__") : new_p4node.set_attr(c, node.get_attr(c))
 
-    if node.is_vec() :
-	    new_p4node.set_vec([deep_copy(elem, seen_ids + [node.id]) for elem in node.vec])
+    if node.is_vec():
+        new_p4node.set_vec([deep_copy(elem, seen_ids + [node.id]) for elem in node.vec])
 
-    for d in node.xdir() :
-	if type(node.get_attr(d)) == P4Node and not (d in ['ref', 'type_ref', 'header_ref', 'field_ref', 'control']):
-	    new_p4node.set_attr(d, deep_copy(node.get_attr(d), seen_ids + [node.id]))
-        else :
-	    new_p4node.set_attr(d, node.get_attr(d))
+    for d in node.xdir():
+        if type(node.get_attr(d)) == P4Node and d not in ['ref', 'type_ref', 'header_ref', 'field_ref', 'control']:
+            new_p4node.set_attr(d, deep_copy(node.get_attr(d), seen_ids + [node.id]))
+        else:
+            new_p4node.set_attr(d, node.get_attr(d))
 
     return new_p4node

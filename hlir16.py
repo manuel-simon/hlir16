@@ -83,7 +83,7 @@ def create_p4_json_file(p4c_filename, p4_version=None, p4c_path=None, json_cache
     if p4c_path is None:
         p4c_path = os.environ['P4C']
 
-    p4test = os.path.join(p4c_path, "build", "p4test")
+    p4compiler = os.path.join(p4c_path, "build", "p4test")
     p4include = os.path.join(p4c_path, "p4include")
 
     remove_json_after_use = False
@@ -99,10 +99,10 @@ def create_p4_json_file(p4c_filename, p4_version=None, p4c_path=None, json_cache
 
     version_opts = ['--p4v', str(p4_version)] if p4_version is not None else []
 
-    opts = [p4test, "-I", p4include, p4c_filename] + version_opts + ["--toJSON", json_filename]
+    opts = [p4compiler, "-I", p4include, p4c_filename] + version_opts + ["--toJSON", json_filename]
 
     errcode = subprocess.call(
-        [p4test, p4c_filename, "-I", p4include, "--toJSON", json_filename] + version_opts)
+        [p4compiler, p4c_filename, "-I", p4include, "--toJSON", json_filename] + version_opts)
 
     return (errcode, remove_json_after_use, json_filename)
 
@@ -114,6 +114,7 @@ def load_p4_json_file(json_filename, p4_version):
         import pkgutil
         if pkgutil.find_loader('ujson') is not None:
             import ujson
+            print("uj")
             json_root = ujson.load(f)
         else:
             json_root = json.load(f)
@@ -126,7 +127,9 @@ def load_p4_json_file(json_filename, p4_version):
     walk_json(json_root, p4node_creator, nodes)
     hlir16 = nodes[json_root['Node_ID']]
 
-    set_additional_attrs(hlir16, nodes, p4_version)
+    success = set_additional_attrs(hlir16, nodes, p4_version)
+    if not success:
+        return ERR_CODE_NO_PROGRAM
 
     return hlir16
 

@@ -20,7 +20,6 @@ from p4node import P4Node, get_fresh_node_id
 import re
 
 from utils_hlir16 import *
-from utils.misc import addError
 
 
 def print_path(full_path, value, root, print_details, matchtype, max_length=70):
@@ -168,6 +167,7 @@ def resolve_path_expression_node(hlir16, path_node, parent):
 
     return resolve_path_expression_node(hlir16, path_node, parent.node_parents[0][-1])
 
+
 def resolve_header_ref(member_expr):
     if hasattr(member_expr, 'expression'):
         return member_expr.expression.type
@@ -175,32 +175,39 @@ def resolve_header_ref(member_expr):
     return member_expr.expr.ref.type.type_ref.fields.get(member_expr.member)
 
 
+def attrs_type_boolean(hlir16):
+    """Add the proper .size attribute to Type_Boolean"""
+
+    for node in hlir16.all_nodes_by_type('Type_Boolean'):
+        node.size = 1
 
 
 def attrs_annotations(hlir16):
     """Annotations (appearing in source code)"""
 
     for node in hlir16.all_nodes_by_type('Annotations'):
-        hlir16.sc_annotations.extend([annot for annot in node.annotations if annot.name!="hidden" and annot.name!="name" and annot.name!=""])
+        hlir16.sc_annotations.extend([annot for annot in node.annotations if annot.name not in ("hidden", "name", "")])
+
 
 def attrs_structs(hlir16):
     for struct in hlir16.objects['Type_Struct']:
         hlir16.set_attr(struct.name, struct)
 
+
 def attrs_resolve_types(hlir16):
-    # --------------------------------------------------------------------------
-    # Resolve all Type_Name and Type_Typedef nodes to real type nodes
+    """Resolve all Type_Name and Type_Typedef nodes to real type nodes"""
 
     for node in hlir16.all_nodes_by_type('Type_Name'):
         resolved_type = resolve_type_name_node(hlir16, node, node)
-        assert(resolved_type is not None) # All Type_Name nodes must be resolved to a real type node
+        assert resolved_type is not None # All Type_Name nodes must be resolved to a real type node
         node.type_ref = resolved_type
+
 
 def attrs_resolve_pathexprs(hlir16):
     """Resolve all PathExpression nodes"""
     for node in hlir16.all_nodes_by_type('PathExpression'):
         resolved_path = resolve_path_expression_node(hlir16, node, node)
-        assert(resolved_path is not None) # All PathExpression nodes must be resolved
+        assert resolved_path is not None # All PathExpression nodes must be resolved
         node.ref = resolved_path
 
 
@@ -217,6 +224,7 @@ def attrs_member_naming(hlir16):
         for member in error.members:
             member.c_name = error.c_name + '_' + member.name
 
+
 def gen_metadata_instance_node(hlir16, iname, tname):
     return P4Node({'id' : get_fresh_node_id(),
                    'node_type' : 'header_instance',
@@ -231,22 +239,24 @@ def gen_metadata_instance_node(hlir16, iname, tname):
 
 
 def known_packages():
-    return { 'V1Switch', 'VSS' }
+    return {'V1Switch', 'PSA_Switch'}
 
 
 def get_main(hlir16):
     for di in hlir16.objects['Declaration_Instance']:
-        if di.type.baseType.type_ref.name in known_packages():
+        bt = di.type.baseType
+
+        name = bt.type_ref.name if hasattr(bt, 'type_ref') else bt.path.name
+
+        if name in known_packages():
             return di
 
 
 def attrs_hdr_metadata_insts(hlir16):
-    # --------------------------------------------------------------------------
-    # Package and package instance
+    """Package and package instance"""
 
-    package_instance = get_main(hlir16)
-    pkgtype = package_instance.type
-    package_name = pkgtype.baseType.type_ref.name
+    pkgtype = get_main(hlir16).type
+    package_name = get_package_name(hlir16)
     # package_params = [hlir16.objects.get(c.type.name) for c in package_instance.arguments]
 
     if package_name == 'V1Switch': #v1model
@@ -254,15 +264,24 @@ def attrs_hdr_metadata_insts(hlir16):
         hdr_insts = pkgtype.arguments[0].type_ref.fields['StructField']
         metadata_insts = pkgtype.arguments[1].type_ref.fields['StructField']
         metadata_insts.append(gen_metadata_instance_node(hlir16, 'standard_metadata', 'standard_metadata_t'))
-    elif package_name == 'VSS': #very_simple_model
-        hdr_insts = package_instance.type.arguments[0].fields['StructField']
-        metadata_insts = [gen_metadata_instance_node(hlir16, 'in_control', 'InControl'),
-                          gen_metadata_instance_node(hlir16, 'out_control', 'OutControl')]
-    else: #An unsupported P4 architecture is used! (All architecture dependent code should be removed from hlir16!)
-        addError('generating hlir16', 'Package {} is not supported!'.format(package_name))
+    elif package_name == 'PSA_Switch': #TODO!
+        #TODO: is there always a struct containing all headers?
+        hdr_insts = pkgtype.arguments[0].type_ref.fields['StructField']
+        metadata_insts = pkgtype.arguments[1].type_ref.fields['StructField']
+
+        metadata_insts.append(gen_metadata_instance_node(hlir16, 'psa_ingress_parser_input_metadata', 'psa_ingress_parser_input_metadata_t'))
+        metadata_insts.append(gen_metadata_instance_node(hlir16, 'psa_egress_parser_input_metadata', 'psa_egress_parser_input_metadata_t'))
+        metadata_insts.append(gen_metadata_instance_node(hlir16, 'psa_ingress_input_metadata', 'psa_ingress_input_metadata_t'))
+        metadata_insts.append(gen_metadata_instance_node(hlir16, 'psa_ingress_output_metadata', 'psa_ingress_output_metadata_t'))
+        metadata_insts.append(gen_metadata_instance_node(hlir16, 'psa_egress_input_metadata', 'psa_egress_input_metadata_t'))
+        metadata_insts.append(gen_metadata_instance_node(hlir16, 'psa_egress_deparser_input_metadata', 'psa_egress_deparser_input_metadata_t'))
+        metadata_insts.append(gen_metadata_instance_node(hlir16, 'psa_egress_output_metadata', 'psa_egress_output_metadata_t'))
+
+    hlir16.hdr_insts = P4Node({'id' : get_fresh_node_id(), 'node_type' : 'header_instance_list'}, hdr_insts)
+    hlir16.metadata_insts = P4Node({'id' : get_fresh_node_id(), 'node_type' : 'header_instance_list'}, metadata_insts)
 
     hlir16.header_instances = P4Node({'id' : get_fresh_node_id(), 'node_type' : 'header_instance_list'}, hdr_insts + attrs_header_refs_in_parser_locals(hlir16) + metadata_insts)
-    return hdr_insts, metadata_insts
+    hlir16.header_instances_with_refs = P4Node({'id' : get_fresh_node_id(), 'node_type' : 'header_instance_list'}, [hi for hi in hlir16.header_instances if hasattr(hi.type, 'type_ref')])
 
 
 def attrs_header_refs_in_parser_locals(hlir16):
@@ -275,12 +294,18 @@ def attrs_header_refs_in_parser_locals(hlir16):
 
 
 
-def attrs_collect_header_types(hlir16, nodes, p4_version, hdr_insts, metadata_insts):
+def attrs_collect_header_types(hlir16):
     """Collecting header types"""
 
+    package_name = get_package_name(hlir16)
+
     # TODO metadata can be bit<x> too, is not always a struct
-    hlir16.header_types = P4Node({'id' : get_fresh_node_id(), 'node_type' : 'header_type_list'},
-                                  hlir16.objects['Type_Header'] + [h.type.type_ref for h in metadata_insts if hasattr(h.type, "type_ref")])
+    if package_name == 'V1Switch': #v1model
+        hlir16.header_types = P4Node({'id' : get_fresh_node_id(), 'node_type' : 'header_type_list'},
+                                     hlir16.objects['Type_Header'] + [h.type.type_ref for h in hlir16.metadata_insts if hasattr(h.type, "type_ref")])
+    elif package_name == 'PSA_Switch':
+        hlir16.header_types = P4Node({'id' : get_fresh_node_id(), 'node_type' : 'header_type_list'},
+                                     [h for h in hlir16.objects['Type_Header'] if 'EMPTY' not in h.name] + [h.type.type_ref for h in hlir16.metadata_insts if hasattr(h.type, "type_ref")])
 
     for h in hlir16.header_types:
         h.valid_fields = ([f for f in h.fields if resolve_typeref(hlir16, f).node_type == 'StructField'])
@@ -359,9 +384,6 @@ def table_key_length(hlir16, table):
 
 
 def attrs_controls_tables(hlir16):
-    # --------------------------------------------------------------------------
-    # Controls and tables
-
     hlir16.control_types = hlir16.objects['Type_Control']
     hlir16.controls = hlir16.objects['P4Control']
 
@@ -383,13 +405,22 @@ def attrs_controls_tables(hlir16):
             table.set_attr(prop.name, prop.value)
         table.remove_attr('properties')
 
+    package_name = get_package_name(hlir16)
+
     for c in hlir16.controls:
         for t in c.tables:
             table_actions = []
-            for a in t.actions.actionList:
-                a.action_object = a.expression.method.ref
-                table_actions.append(a)
-            t.actions = table_actions
+
+            if package_name == 'V1Switch': #v1model
+                for a in t.actions.actionList:
+                    a.action_object = a.expression.method.ref
+                    table_actions.append(a)
+                t.actions = table_actions
+            elif package_name == 'PSA_Switch':
+                for a in t.properties.properties.get('actions', 'Property').value.actionList:
+                    table_actions.append(a.expression.method.ref)
+
+                t.control.actions = table_actions
 
     # some tables do not have a key (e.g. 'tbl_act*'), we do not want to deal with them for now
     # hlir16.tables[:] = [table for table in hlir16.tables if hasattr(table, 'key')]
@@ -420,12 +451,19 @@ def attrs_extract_node(hlir16, node, method):
         node.width = node.methodCall.arguments[1]
 
 
+def attrs_extract_nodes(hlir16):
+    for node, method in find_extract_nodes(hlir16):
+        attrs_extract_node(hlir16, node, method)
+
+
 def get_children(node, f = lambda n: True, visited=[]):
-    if node in visited: return []
+    if node in visited:
+        return []
 
     children = []
     new_visited = visited + [node]
-    if f(node): children.append(node)
+    if f(node):
+        children.append(node)
 
     if type(node) is list:
         for _, subnode in enumerate(node):
@@ -471,9 +509,9 @@ def find_extract_nodes(hlir16):
 
                     yield (node, method)
                 elif method.member in {'lookahead', 'advance', 'length'}:
-                    addError('generating hlir16', 'packet_in.{} is not supported yet!'.format(method.member))
+                    raise NotImplementedError('packet_in.{} is not supported yet!'.format(method.member))
                 else:
-                    assert(False) #The only possible method calls on packet_in are extract, lookahead, advance and length
+                    assert False #The only possible method calls on packet_in are extract, lookahead, advance and length
 
 
 def attrs_header_refs_in_exprs(hlir16):
@@ -493,23 +531,28 @@ def attrs_header_refs_in_exprs(hlir16):
 
         member_type = with_ref(member.expr.ref.type)
 
-        if member.expr.node_type != 'PathExpression' or member.expr.ref.node_type != 'Parameter'\
-           or member_type.node_type != 'Type_Struct':
+        if (member.expr.node_type, member.expr.ref.node_type, member_type.node_type) != ('PathExpression', 'Parameter', 'Type_Struct'):
             continue
 
         if member_type in hlir16.header_types:
             member.expr.header_ref = hlir16.header_instances.get(member.expr.ref.name)
         elif with_ref(member_type.fields.get(member.member).type) in hlir16.header_types:
             member.header_ref = resolve_header_ref(member)
+        elif member_type.name == 'metadata':
+            member.header_ref = member.expr.type
         else:
-            addError('generating hlir16', 'Unable to resolve header reference: {}'.format(member))
+            raise NotImplementedError('Unable to resolve header reference: {}.{} ({})'.format(member.expr.type.name, member.member, member))
 
 
 def attrs_field_refs_in_exprs(hlir16):
     """Field references in expressions"""
 
     for member in hlir16.all_nodes_by_type('Member'):
-        if not hasattr(member.expr, 'header_ref') or member.expr.header_ref.type.type_ref.fields.get(member.member) == None:
+        if not hasattr(member.expr, 'header_ref'):
+            continue
+        if member.expr.header_ref is None:
+            continue
+        if member.expr.header_ref.type.type_ref.fields.get(member.member) is None:
             continue
 
         member.field_ref = member.expr.header_ref.type.type_ref.fields.get(member.member)
@@ -535,11 +578,11 @@ def set_common_attrs(hlir16, node):
     # Note: the external lambda makes sure the actual node is the operand,
     # not the last value that the "node" variable takes
     node.set_attr('paths_to',
-        (lambda n: lambda value, print_details=False, match='prefix': paths_to(n, value, print_details=print_details, match=match))(node),
-    )
+                  (lambda n: lambda value, print_details=False, match='prefix': paths_to(n, value, print_details=print_details, match=match))(node),
+                 )
     node.set_attr('by_type',
-        (lambda n: lambda typename: P4Node({}, [f for f in hlir16.objects if f.node_type == typename or f.node_type == 'Type_' + typename]))(node),
-    )
+                  (lambda n: lambda typename: P4Node({}, [f for f in hlir16.objects if f.node_type == typename or f.node_type == 'Type_' + typename]))(node),
+                 )
 
 
 def get_ctrlloc_smem_type(loc):
@@ -592,22 +635,44 @@ def find_p4_nodes(hlir16, nodes):
         yield node
 
 
-def set_additional_attrs(hlir16, nodes, p4_version):
+def get_package_name(hlir16):
+    package_instance = get_main(hlir16)
+    pkgtype = package_instance.type
+    bt = pkgtype.baseType
+    return bt.type_ref.name if hasattr(bt, 'type_ref') else bt.path.name
+
+
+def check_is_model_supported(hlir16):
+    """Returns whether the loaded model is supported."""
+
+    package_name = get_package_name(hlir16)
+    if package_name not in known_packages():
+        raise NotImplementedError('Unsupported model: {}'.format(package_name))
+
+
+def set_additional_attrs(hlir16, nodes, p4_version, additional_attr_funs = [
+        attrs_type_boolean,
+        attrs_annotations,
+        attrs_structs,
+        attrs_resolve_types,
+        attrs_resolve_pathexprs,
+        attrs_member_naming,
+        attrs_hdr_metadata_insts,
+        attrs_collect_header_types,
+        attrs_controls_tables,
+        attrs_extract_nodes,
+        attrs_header_refs_in_exprs,
+        attrs_field_refs_in_exprs,
+        attrs_stateful_memory
+    ]):
+
     set_top_level_attrs(hlir16, nodes, p4_version)
     for node in find_p4_nodes(hlir16, nodes):
         set_common_attrs(hlir16, node)
 
-    attrs_annotations(hlir16)
-    attrs_structs(hlir16)
-    attrs_resolve_types(hlir16)
-    attrs_resolve_pathexprs(hlir16)
-    attrs_member_naming(hlir16)
-    hdr_insts, metadata_insts = attrs_hdr_metadata_insts(hlir16)
-    attrs_collect_header_types(hlir16, nodes, p4_version, hdr_insts, metadata_insts)
-    attrs_controls_tables(hlir16)
-    for node, method in find_extract_nodes(hlir16):
-        attrs_extract_node(hlir16, node, method)
+    check_is_model_supported(hlir16)
 
-    attrs_header_refs_in_exprs(hlir16)
-    attrs_field_refs_in_exprs(hlir16)
-    attrs_stateful_memory(hlir16)
+    for attrfun in additional_attr_funs:
+        attrfun(hlir16)
+
+    return True
