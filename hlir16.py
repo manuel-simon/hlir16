@@ -114,7 +114,6 @@ def load_p4_json_file(json_filename, p4_version):
         import pkgutil
         if pkgutil.find_loader('ujson') is not None:
             import ujson
-            print("uj")
             json_root = ujson.load(f)
         else:
             json_root = json.load(f)
