@@ -30,6 +30,13 @@ def has_method(obj, method_name):
     return hasattr(obj, method_name) and callable(getattr(obj, method_name))
 
 
+def walk_json_from_top(node, fun):
+    nodes = {}
+    hlir = walk_json(node, fun, nodes)
+    hlir.all_nodes = P4Node({}, nodes)
+    return hlir
+
+
 def walk_json(node, fun, nodes, skip_elems=['Node_Type', 'Node_ID', 'Source_Info'], node_parent_chain=[]):
     rets = []
     if type(node) is dict or type(node) is list:
