@@ -249,11 +249,23 @@ def set_annotations(node, annots):
     node.annotations.annotations = P4Node({}, annots)
 
 
-def gen_metadata_instance_node(hlir16, metadata_inst_name, metadata_type):
+def untypedef(f):
+    while f.node_type == "Type_Typedef":
+        f = f.type.type_ref
+    return f
+
+
+def metadata_type_name_to_inst_name(mt_name):
+    if mt_name == 'metadata':
+        return 'meta'
+    return re.sub(r'_t$', '', mt_name)
+
+def gen_metadata_instance_node(hlir16, metadata_type):
     new_inst_node           = P4Node({})
     new_inst_node.node_type = 'StructField'
-    new_inst_node.name      = metadata_inst_name
+    new_inst_node.name      = metadata_type_name_to_inst_name(metadata_type.name)
     new_inst_node.preparsed = True
+    new_inst_node.type_ref  = metadata_type
     set_annotations(new_inst_node, [])
     new_inst_node.type = P4Node({})
     new_inst_node.type.node_type = 'Type_Name'
@@ -262,17 +274,7 @@ def gen_metadata_instance_node(hlir16, metadata_inst_name, metadata_type):
     new_inst_node.type.path.absolute = True
     new_inst_node.type.type_ref = metadata_type
 
-    # TODO this temporarily eliminates Type_Error, an enum, but that should also be in there
-    new_inst_node.type.type_ref.fields = P4Node({}, [f for f in new_inst_node.type.type_ref.fields if f.type.node_type != 'Type_Name'])
-
-    # new_inst_node.preparsed = False
-    # new_inst_node.header_ref = hlir16.objects.get(metadata_type_name, 'Type_Struct')
-    # new_inst_node.type            = P4Node({})
-    # new_inst_node.type.node_type  = 'Type_Name'
-    # new_inst_node.type.type_ref   = hlir16.objects.get(metadata_type_name, 'Type_Struct')
-    # new_inst_node.type.path            = P4Node({})
-    # new_inst_node.type.path.node_type  = 'StructField'
-    # new_inst_node.type.path.name       = metadata_inst_name
+    new_inst_node.type.type_ref.fields = P4Node({}, [untypedef(f) for f in new_inst_node.type.type_ref.fields])
 
     return new_inst_node
 
@@ -292,6 +294,18 @@ def set_p4_main(hlir16):
             return
 
 
+def attrs_add_standard_metadata_t(hlir16):
+    """Adds standard metadata if it does not exist."""
+    stdmt = hlir16.objects.get('standard_metadata_t', 'Type_Struct')
+    if not stdmt:
+        stdmt           = P4Node({})
+        stdmt.node_type = 'Type_Struct'
+        stdmt.name      = "standard_metadata_t"
+        stdmt.fields    = P4Node({}, [])
+
+        hlir16.objects.append(stdmt)
+
+
 def attrs_hdr_metadata_insts(hlir16):
     """Package and package instance"""
 
@@ -299,19 +313,18 @@ def attrs_hdr_metadata_insts(hlir16):
     package_name = hlir16.p4_model
 
     hdr_insts = P4Node({}, pkgtype.arguments[0].type_ref.fields['StructField'])
-    metadata_insts = P4Node({}, [])
 
+    # TODO detect these programatically: these are structs that describe parameters of parsers/controls
     known_not_metadata_structs = [
-        'metadata',
         'headers',
         'mac_learn_digest_t',
         'mac_learn_digest',
+        'parsed_packet',
     ]
 
     metadata_types = [mt for mt in hlir16.objects['Type_Struct'] if mt.name not in known_not_metadata_structs]
 
-    metadata_inst_names = [(re.sub(r'_t$', '', mt.name), mt) for mt in metadata_types]
-    metadata_insts = [gen_metadata_instance_node(hlir16, mname, mt) for mname, mt in metadata_inst_names]
+    metadata_insts = [gen_metadata_instance_node(hlir16, mt) for mt in metadata_types]
 
     hlir16.metadata_insts = P4Node({}, metadata_insts)
 
@@ -328,6 +341,28 @@ def attrs_header_refs_in_parser_locals(hlir16):
     return P4Node({}, [local for parser in hlir16.objects['P4Parser'] for local in parser.parserLocals if is_tmp_header_inst(local)])
 
 
+def dlog(num, base=2):
+    """Returns the discrete logarithm of num.
+    For the standard base 2, this is the number of bits required to store the range 0..num."""
+    return [n for n in range(32) if num < base**n][0]
+
+
+def attrs_add_enum_sizes(hlir16):
+    """Types that have members do not have a proper size (bit width) as we get it.
+    We need to compute them by hand."""
+    enum_types = ['Type_Error', 'Type_Enum']
+
+    for h in hlir16.header_types:
+        for f in h.fields:
+            tref = resolve_typeref(hlir16, f)._type._type_ref
+            if tref.node_type not in enum_types:
+                continue
+
+            tref.size = dlog(len(tref.members))
+            tref.type = tref
+            # TODO is this not needed?
+            tref.preparsed = True
+
 
 def attrs_collect_header_types(hlir16):
     """Collecting header types"""
@@ -342,26 +377,31 @@ def attrs_collect_header_types(hlir16):
         hlir16.header_types = P4Node({'id' : get_fresh_node_id(), 'node_type' : 'header_type_list'},
                                      [h for h in hlir16.objects['Type_Header'] if 'EMPTY' not in h.name] + [h.type.type_ref for h in hlir16.metadata_insts if hasattr(h.type, "type_ref")])
 
-    for h in hlir16.header_types:
-        h.is_metadata = h.node_type != 'Type_Header'
-        h.id = 'header_'+h.name
+
+def attrs_header_types_add_attrs(hlir16):
+    """Collecting header types, part 2"""
+
+    for hdrt in hlir16.header_types:
+        hdrt.is_metadata = hdrt.node_type != 'Type_Header'
+        hdrt.id = 'header_'+hdrt.name
         offset = 0
 
-        h.bit_width   = sum([resolve_typeref(hlir16, f).type.size for f in h.fields])
-        h.byte_width  = bits_to_bytes(h.bit_width)
+        hdrt.bit_width   = sum([resolve_typeref(hlir16, f).type._type_ref._type.size for f in hdrt.fields])
+        hdrt.byte_width  = bits_to_bytes(hdrt.bit_width)
         is_vw = False
-        for f in h.fields:
-            f = resolve_typeref(hlir16, f)
+        for f in hdrt.fields:
+            tref = resolve_typeref(hlir16, f)
 
-            f.id = 'field_' + h.name + '_' + f.name # TODO
+            f.id = 'field_{}_{}'.format(hdrt.name, tref.name)
             # TODO bit_offset, byte_offset, mask
             f.offset = offset
-            f.size = f.type.size
-            offset += f.size
-            f.is_vw = (f.type.node_type == 'Type_Varbits') # 'Type_Bits' vs. 'Type_Varbits'
-            is_vw |= f.is_vw
+            f.size = tref.type._type_ref._type.size
+            f.is_vw = (tref.type.node_type == 'Type_Varbits') # 'Type_Bits' vs. 'Type_Varbits'
             f.preparsed = False #f.name == 'ttl'
-        h.is_vw = is_vw
+
+            offset += f.size
+            is_vw |= f.is_vw
+        hdrt.is_vw = is_vw
 
     for hdr in hlir16.header_instances:
         hdr.id = re.sub(r'\[([0-9]+)\]', r'_\1', "header_instance_"+hdr.name)
@@ -404,7 +444,9 @@ def set_table_key_attrs(hlir16, table):
 def get_meta_instance(hlir16, metaname):
     # Note: here we suppose that the field names look like this: _<metainst type><possible generated metainst index>_<field name><generated metafield index>
     maybe_meta = [(mi, fld) for mi in hlir16.metadata_insts for fld in mi.type.type_ref.fields if re.match("^_{}[0-9]*_{}[0-9]+$".format(mi.name, fld.name), metaname)]
-    if len(maybe_meta) != 1:
+    if len(maybe_meta) == 0:
+        addError("finding metadata field", "Could not find metadata field {}".format(metaname))
+    if len(maybe_meta) > 1:
         addError("finding metadata field", "Metadata field {} is ambiguous, {} candidates are: {}".format(metaname, len(maybe_meta), ", ".join(["({};{})".format(mi.name, fld.name) for mi, fld in maybe_meta])))
     return maybe_meta[0]
 
@@ -581,6 +623,8 @@ def attrs_header_refs_in_exprs(hlir16):
             member.header_ref = member.expr.type
         elif member.expr.path.name == 'standard_metadata':
             member.header_ref = hlir16.metadata_insts.get('standard_metadata').type
+        elif member.type.node_type == 'Type_Stack':
+            raise NotImplementedError('Header stacks are currently not supported')
         else:
             raise NotImplementedError('Unable to resolve header reference: {}.{} ({})'.format(member.expr.type.name, member.member, member))
 
@@ -742,9 +786,12 @@ def default_attr_funs():
         attrs_resolve_types,
         attrs_resolve_pathexprs,
         attrs_member_naming,
+        attrs_add_standard_metadata_t,
         attrs_hdr_metadata_insts,
         attrs_add_metadata_drop,
         attrs_collect_header_types,
+        attrs_add_enum_sizes,
+        attrs_header_types_add_attrs,
         attrs_controls_tables,
         attrs_extract_nodes,
         attrs_header_refs_in_exprs,
