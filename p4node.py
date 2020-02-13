@@ -98,7 +98,7 @@ class P4Node(object):
 
     def __str__(self, show_name=True, show_type=True, show_funs=True, details=True, show_colours=True, depth=0):
         """A textual representation of a P4 HLIR node."""
-        if self.vec is not None:
+        if self.vec is not None and details:
             if len(self.vec) > 0 and type(self.vec[0]) is P4Node:
                 fmt   = '{{0:>{}}} {{1}}'.format(len(str(len(self.vec))))
                 if type(self.vec) is dict:
@@ -111,7 +111,7 @@ class P4Node(object):
 
         part1 = name if show_name else ""
         part2 = "#" + str(self.get_attr('Node_ID'))
-        part3 = "#{}".format(self.node_type) if show_type else ""
+        part3 = "#{}".format(self.node_type) if show_type and hasattr(self, 'node_type') else ""
         part4 = "[{}]".format(', '.join(self.xdir(details, depth=depth))) if show_funs else ""
 
         indent = " " * (8*depth)
@@ -325,7 +325,7 @@ class P4Node(object):
                 return (attrlen > 0, "**" + _c(str(attrlen), clr_attrmul if attrlen > 0 else clr_off, show_colours))
 
             listables = ['NameMap', 'ParameterList', 'Annotations', 'Vector']
-            is_listable = [attr.node_type.startswith(t) for t in listables if hasattr(attr, 'node_type')] != []
+            is_listable = False if not hasattr(attr, 'node_type') else True in [attr.node_type.startswith(t) for t in listables]
             if attr.vec is None and not is_listable:
                 return (True, "")
 
@@ -341,10 +341,13 @@ class P4Node(object):
     def str(self, show_name=True, show_type=True, show_funs=True, details=True, show_colours=True, depth=0):
         return P4Node.__str__(self, show_name, show_type, show_funs, details, show_colours, depth)
 
-    def get(self, name, type_name=None, cond=lambda elem: True):
-        """A convenient way to get the element with the given name (and type, if given) in a vector.
-        A predicate that takes the element as a parameter can also be specified."""
-        potentials = [elem for elem in self.vec if elem.get_attr('name') == name and (type_name == None or elem.node_type == type_name) if cond(elem)]
+    def get(self, name, type_names=[], cond=lambda elem: True):
+        """A convenient way to get the element with the given name (and types, if given) in a vector.
+        You can impose further limitations on the returned elements with the condition argument.
+        """
+        if type(type_names) is str:
+            type_names = [type_names]
+        potentials = [elem for elem in self.vec if elem.get_attr('name') == name and (type_names == [] or elem.node_type in type_names) if cond(elem)]
         return potentials[0] if len(potentials) == 1 else None
 
 
