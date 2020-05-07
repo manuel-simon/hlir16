@@ -87,6 +87,7 @@ class P4Node(object):
         "paths_to",
         "by_type",
         "json_repr",
+        "canonical_type",
     }
 
     def __init__(self, dict={}, vec=None):
@@ -164,6 +165,14 @@ class P4Node(object):
 
     def __nonzero__(self):
         return 'node_type' in self.__dict__ and self.__dict__['node_type'] != "INVALID"
+
+    # TODO this would be better if it was set in set_common_attrs in hlir16_attrs
+    def canonical_type(self):
+        node = self
+        # Note: for enums, node.type == node, which would result in an infinite loop
+        while hasattr(node, "type") and node != node.type._type_ref:
+            node = node.type._type_ref
+        return node
 
     def json_repr(self, depth=3, max_vector_len=lambda depth: 2 if depth > 2 or depth <= 0 else [8, 4][depth - 1], is_top_level = True):
         if depth <= 0:
@@ -282,6 +291,8 @@ class P4Node(object):
                 'header_ref.name',
                 'type_ref.path.name',
                 'type_ref.name',
+                'type.type_ref.path.name',
+                'type.type_ref.name',
                 'type.path.node_type',
                 'type.path.name',
                 'type.name',

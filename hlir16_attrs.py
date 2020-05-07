@@ -132,19 +132,6 @@ def match_type(table):
     if lpm_count == 0: return 'EXACT'
 
 
-# TODO remove this; instead:
-# TODO in set_additional_attrs, replace all type references with the referenced types
-def resolve_typeref(hlir16, f):
-    # resolving type reference
-    if hasattr(f, 'header_ref'):
-        return f.header_ref
-
-    if f.type.node_type == 'Type_Name':
-        tref = f.type._type_ref
-        return hlir16.objects.get(tref.name)
-
-    return f
-
 def resolve_type_name_node(hlir16, type_name_node, parent):
     if parent.node_type == 'P4Program':
         return hlir16.objects.get(type_name_node.path.name)
@@ -243,11 +230,12 @@ def attrs_member_naming(hlir16):
             member.c_name = error.c_name + '_' + member.name
 
 
-def set_annotations(node, annots):
+def set_annotations(hlir16, node, annots):
     node.annotations = P4Node({})
     node.annotations.node_type = 'Annotations'
     node.annotations.annotations = P4Node({}, annots)
 
+    set_common_attrs(hlir16, node)
 
 def untypedef(f):
     while f.node_type == "Type_Typedef":
@@ -266,13 +254,15 @@ def gen_metadata_instance_node(hlir16, metadata_type):
     new_inst_node.name      = metadata_type_name_to_inst_name(metadata_type.name)
     new_inst_node.preparsed = True
     new_inst_node.type_ref  = metadata_type
-    set_annotations(new_inst_node, [])
+    set_common_attrs(hlir16, new_inst_node)
+    set_annotations(hlir16, new_inst_node, [])
     new_inst_node.type = P4Node({})
     new_inst_node.type.node_type = 'Type_Name'
     new_inst_node.type.path = P4Node({})
     new_inst_node.type.path.name = metadata_type.name
     new_inst_node.type.path.absolute = True
     new_inst_node.type.type_ref = metadata_type
+    set_common_attrs(hlir16, new_inst_node.type)
 
     new_inst_node.type.type_ref.fields = P4Node({}, [untypedef(f) for f in new_inst_node.type.type_ref.fields])
 
@@ -302,6 +292,7 @@ def attrs_add_standard_metadata_t(hlir16):
         stdmt.node_type = 'Type_Struct'
         stdmt.name      = "standard_metadata_t"
         stdmt.fields    = P4Node({}, [])
+        set_common_attrs(hlir16, stdmt)
 
         hlir16.objects.append(stdmt)
 
@@ -313,6 +304,7 @@ def attrs_hdr_metadata_insts(hlir16):
     package_name = hlir16.p4_model
 
     hdr_insts = P4Node({}, pkgtype.arguments[0].type_ref.fields['StructField'])
+    set_common_attrs(hlir16, hdr_insts)
 
     # TODO detect these programatically: these are structs that describe parameters of parsers/controls
     known_not_metadata_structs = [
@@ -327,9 +319,12 @@ def attrs_hdr_metadata_insts(hlir16):
     metadata_insts = [gen_metadata_instance_node(hlir16, mt) for mt in metadata_types]
 
     hlir16.metadata_insts = P4Node({}, metadata_insts)
+    set_common_attrs(hlir16, hlir16.metadata_insts)
 
     hlir16.header_instances = P4Node({}, hdr_insts + attrs_header_refs_in_parser_locals(hlir16) + metadata_insts)
+    set_common_attrs(hlir16, hlir16.header_instances)
     hlir16.header_instances_with_refs = P4Node({}, [hi for hi in hlir16.header_instances if hasattr(hi.type, 'type_ref')])
+    set_common_attrs(hlir16, hlir16.header_instances_with_refs)
 
 
 def attrs_header_refs_in_parser_locals(hlir16):
@@ -354,7 +349,7 @@ def attrs_add_enum_sizes(hlir16):
 
     for h in hlir16.header_types:
         for f in h.fields:
-            tref = resolve_typeref(hlir16, f)._type._type_ref
+            tref = f.canonical_type()
             if tref.node_type not in enum_types:
                 continue
 
@@ -376,6 +371,7 @@ def attrs_collect_header_types(hlir16):
     elif package_name == 'PSA_Switch':
         hlir16.header_types = P4Node({'id' : get_fresh_node_id(), 'node_type' : 'header_type_list'},
                                      [h for h in hlir16.objects['Type_Header'] if 'EMPTY' not in h.name] + [h.type.type_ref for h in hlir16.metadata_insts if hasattr(h.type, "type_ref")])
+    set_common_attrs(hlir16, hlir16.header_types)
 
 
 def attrs_header_types_add_attrs(hlir16):
@@ -386,17 +382,17 @@ def attrs_header_types_add_attrs(hlir16):
         hdrt.id = 'header_'+hdrt.name
         offset = 0
 
-        hdrt.bit_width   = sum([resolve_typeref(hlir16, f).type._type_ref._type.size for f in hdrt.fields])
+        hdrt.bit_width   = sum([f.canonical_type().size for f in hdrt.fields])
         hdrt.byte_width  = bits_to_bytes(hdrt.bit_width)
         is_vw = False
         for f in hdrt.fields:
-            tref = resolve_typeref(hlir16, f)
+            tref = f.canonical_type()
 
-            f.id = 'field_{}_{}'.format(hdrt.name, tref.name)
+            f.id = 'field_{}_{}'.format(hdrt.name, f.name)
             # TODO bit_offset, byte_offset, mask
             f.offset = offset
-            f.size = tref.type._type_ref._type.size
-            f.is_vw = (tref.type.node_type == 'Type_Varbits') # 'Type_Bits' vs. 'Type_Varbits'
+            f.size = tref.size
+            f.is_vw = (tref.node_type == 'Type_Varbits') # 'Type_Bits' vs. 'Type_Varbits'
             f.preparsed = False #f.name == 'ttl'
 
             offset += f.size
@@ -435,8 +431,8 @@ def set_table_key_attrs(hlir16, table):
         size = k.get_attr('size')
 
         if size is None:
-            kfld = resolve_typeref(hlir16, k.header.type.type_ref.fields.get(k.field_name))
-            k.width = kfld.type.size
+            kfld = k.header.type.type_ref.fields.get(k.field_name).canonical_type()
+            k.width = kfld.size
         else:
             k.width = size
 
@@ -485,14 +481,17 @@ def attrs_controls_tables(hlir16):
 
     for c in hlir16.objects['P4Control']:
         c.tables = P4Node({}, c.controlLocals['P4Table'])
+        set_common_attrs(hlir16, c.tables)
         for t in c.tables:
             t.control = c
         c.actions = P4Node({}, c.controlLocals['P4Action'])
+        set_common_attrs(hlir16, c.actions)
 
     main = hlir16.p4_main
     pipeline_elements = main.arguments
 
     hlir16.tables = P4Node({}, [table for ctrl in hlir16.controls for table in ctrl.controlLocals['P4Table']])
+    set_common_attrs(hlir16, hlir16.tables)
 
     for table in hlir16.tables:
         for prop in table.properties.properties:
@@ -506,6 +505,7 @@ def attrs_controls_tables(hlir16):
             for a in t.actions.actionList:
                 a.action_object = a.expression.method.ref
             t.actions = P4Node({}, t.actions.actionList)
+            set_common_attrs(hlir16, t.actions)
 
     for table in hlir16.tables:
         if not hasattr(table, 'key'):
@@ -700,19 +700,79 @@ def get_registers(hlir16):
     return [r for r in hlir16.objects['Declaration_Instance'] if r.type.baseType.path.name == 'register']
 
 
+# In v1model, all software memory cells are represented as 32 bit integers
+def smem_repr_type(smem):
+    if smem.is_signed:
+        tname = "int"
+    else:
+        tname = "uint"
+
+    for w in [8,16,32,64]:
+        if smem.bit_width <= w:
+            return "register_" + tname + str(w) + "_t"
+
+    return "NOT_SUPPORTED"
+
+
+def smem_components(smem):
+    smem.bit_width = smem.type.arguments[0].size if smem.smem_type == "register" else 32
+    smem.is_signed = smem.type.arguments[0].isSigned if smem.smem_type == "register" else False
+    if smem.smem_type not in ["direct_counter", "direct_meter"]:
+        smem.amount = smem.arguments['Argument'][0].expression.value
+
+    base_type = smem_repr_type(smem)
+
+    if smem.smem_type == 'register':
+        return [{"type": base_type, "name": smem.name}]
+
+    member = [s.expression for s in smem.arguments if s.expression.node_type == 'Member'][0]
+
+    # TODO set these in hlir16_attrs
+    smem.packets_or_bytes = member.member
+    smem.smem_for = {
+        "packets": smem.packets_or_bytes in ("packets", "packets_and_bytes"),
+        "bytes":   smem.packets_or_bytes in (  "bytes", "packets_and_bytes"),
+    }
+
+    pkts_name  = "{}_{}_packets".format(smem.smem_type, smem.name)
+    bytes_name = "{}_{}_bytes".format(smem.smem_type, smem.name)
+
+    pbs = {
+        "packets":           [{"for": "packets", "type": base_type, "name": pkts_name}],
+        "bytes":             [{"for":   "bytes", "type": base_type, "name": bytes_name}],
+
+        "packets_and_bytes": [{"for": "packets", "type": base_type, "name": pkts_name},
+                              {"for":   "bytes", "type": base_type, "name": bytes_name}],
+    }
+
+    return pbs[smem.packets_or_bytes]
 def attrs_stateful_memory(hlir16):
     # direct counters
     for table in hlir16.tables:
-        table.meters    = P4Node({}, [m for t, m in get_smems('direct_meter', [table])])
-        table.counters  = P4Node({}, [c for t, c in get_smems('direct_counter', [table])])
+        table.direct_meters    = P4Node({}, unique_list([m for t, m in get_smems('direct_meter', [table])]))
+        set_common_attrs(hlir16, table.direct_meters)
+        table.direct_counters  = P4Node({}, unique_list([c for t, c in get_smems('direct_counter', [table])]))
+        set_common_attrs(hlir16, table.direct_counters)
 
     # indirect counters
-    hlir16.meters    = P4Node({}, get_smems('meter', hlir16.tables))
-    hlir16.counters  = P4Node({}, get_smems('counter', hlir16.tables))
-    hlir16.registers = P4Node({}, get_registers(hlir16))
+    hlir16.meters    = P4Node({}, unique_list(get_smems('meter', hlir16.tables)))
+    set_common_attrs(hlir16, hlir16.meters)
+    hlir16.counters  = P4Node({}, unique_list(get_smems('counter', hlir16.tables)))
+    set_common_attrs(hlir16, hlir16.counters)
+    hlir16.registers = P4Node({}, unique_list(get_registers(hlir16)))
+    set_common_attrs(hlir16, hlir16.registers)
 
-    hlir16.all_meters   = P4Node({}, unique_list(hlir16.meters   + [(t, m) for t in hlir16.tables for m in t.meters]))
-    hlir16.all_counters = P4Node({}, unique_list(hlir16.counters + [(t, c) for t in hlir16.tables for c in t.counters]))
+    hlir16.all_meters   = P4Node({}, unique_list(hlir16.meters   + [(t, m) for t in hlir16.tables for m in t.direct_meters]))
+    set_common_attrs(hlir16, hlir16.all_meters)
+    hlir16.all_counters = P4Node({}, unique_list(hlir16.counters + [(t, c) for t in hlir16.tables for c in t.direct_counters]))
+    set_common_attrs(hlir16, hlir16.all_counters)
+
+    for _table, smem in hlir16.all_meters + hlir16.all_counters:
+        smem.smem_type  = smem.type._baseType.path.name
+        smem.components = smem_components(smem)
+    for smem in hlir16.registers:
+        smem.smem_type  = smem.type._baseType.path.name
+        smem.components = smem_components(smem)
 
 
 def attrs_typedef(hlir16):
@@ -735,32 +795,35 @@ def find_p4_nodes(hlir16):
         yield node
 
 
-def attrs_add_metadata_drop(hlir16):
+def attrs_add_field_to_standard_metadata(hlir16, name, size):
     """P4 documentation suggests using magic numbers as egress ports:
     const PortId DROP_PORT = 0xF;
     As these constants do not show up in the JSON representation,
     they cannot be present in HLIR.
-    This function adds the 'drop' field to the standard_metadata header as a temporary fix."""
+    This function is used to add the 'drop' field to the standard_metadata header as a temporary fix.
+    Other required, but not necessarily present fields can be added as well."""
 
     mi = hlir16.metadata_insts.get('standard_metadata', 'StructField')
     mit = mi.type.type_ref
 
-    if 'drop' in [f.name for f in mit.fields]:
+    if name in [f.name for f in mit.fields]:
         return
 
-    drop_field           = P4Node({})
-    drop_field.node_type = 'StructField'
-    drop_field.name      = 'drop'
-    set_annotations(drop_field, [])
-    # drop_field.is_vw     = False
-    # drop_field.preparsed = False
-    # drop_field.size      = 1
-    drop_field.type      = P4Node({})
-    drop_field.type.node_type = 'Type_Bits'
-    drop_field.type.isSigned  = False
-    drop_field.type.size      = 1
+    new_field           = P4Node({})
+    new_field.node_type = 'StructField'
+    new_field.name      = name
+    set_common_attrs(hlir16, new_field)
+    set_annotations(hlir16, new_field, [])
+    # new_field.is_vw     = False
+    # new_field.preparsed = False
+    # new_field.size      = 1
+    new_field.type      = P4Node({})
+    new_field.type.node_type = 'Type_Bits'
+    new_field.type.isSigned  = False
+    new_field.type.size      = size
+    set_common_attrs(hlir16, new_field.type)
 
-    mit.fields.append(drop_field)
+    mit.fields.append(new_field)
 
 
 def set_p4_model(hlir16):
@@ -788,7 +851,8 @@ def default_attr_funs():
         attrs_member_naming,
         attrs_add_standard_metadata_t,
         attrs_hdr_metadata_insts,
-        attrs_add_metadata_drop,
+        lambda hlir16: attrs_add_field_to_standard_metadata(hlir16, "drop", 1),
+        lambda hlir16: attrs_add_field_to_standard_metadata(hlir16, "egress_spec", 32),
         attrs_collect_header_types,
         attrs_add_enum_sizes,
         attrs_header_types_add_attrs,
@@ -819,3 +883,4 @@ def set_additional_attrs(hlir16, p4_version, additional_attr_funs = None):
         attrfun(hlir16)
 
     return hlir16
+
