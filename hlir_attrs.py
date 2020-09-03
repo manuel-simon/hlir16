@@ -1,339 +1,671 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+# SPDX-License-Identifier: Apache-2.0
 # Copyright 2017 Eotvos Lorand University, Budapest, Hungary
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
-
-from p4node import P4Node, get_fresh_node_id
-import re
-
-from utils_hlir16 import *
+from hlir16.p4node import P4Node, get_fresh_node_id
 from utils.misc import addWarning, addError
+from compiler_common import unique_everseen
+
+import re
+from collections import Counter
 
 
-def print_path(full_path, value, root, print_details, matchtype, nodetxt, max_length=70):
-    full_path_txt = ""
-    current_node = root
-    for elem in full_path:
-        if type(elem) is not int:
-            current_node = current_node.get_attr(elem)
-            current_path = "." + str(elem)
-        else:
-            if type(current_node) is list:
-                subnode = current_node[elem]
-                next_node = current_node[elem]
-            else:
-                subnode = current_node.vec[elem]
-                next_node = current_node.vec[elem]
+simple_binary_ops = {'Div':'/', 'Mod':'%',                                 #Binary arithmetic operators
+                     'Grt':'>', 'Geq':'>=', 'Lss':'<', 'Leq':'<=',         #Binary comparison operators
+                     'BAnd':'&', 'BOr':'|', 'BXor':'^',                    #Bitwise operators
+                     'LAnd':'&&', 'LOr':'||',                              #Boolean operators
+                     'Equ':'==', 'Neq':'!='}                               #Equality operators
 
-            if type(current_node) is P4Node and type(subnode) is P4Node and subnode.get_attr('node_type') is not None:
-                node_type = subnode.get_attr('node_type')
-                idx = current_node[node_type].vec.index(subnode)
-                current_path = "['{}'][{}]".format(node_type, idx)
-            else:
-                current_path = "[{}]".format(elem)
-            current_node = next_node
-
-        full_path_txt += current_path
-
-        if print_details:
-            current_content = ""
-            if type(current_node) is list:
-                current_content = current_node
-            if type(current_node) is P4Node and current_node.is_vec():
-                current_content = [subnode.str(show_funs=False) for subnode in current_node.vec]
-
-            current_node_display = current_node.str(show_funs=False) if type(current_node) is P4Node else str(current_node)
-
-            current_node_id = current_node.id if type(current_node) is P4Node else "?"
-
-            print "  - {0:<17}   {1:<6}   {2}   {3}".format(current_path, current_node_id, str(current_node_display)[:max_length], str(current_content)[:max_length])
-    print nodetxt, " ", matchtype, full_path_txt if full_path_txt.strip() != "" else "(the node itself)"
+# TODO currently, AddSat and SubSat are handled exactly as Add and Sub
+complex_binary_ops = {'AddSat':'+', 'SubSat':'-', 'Add':'+', 'Sub':'-', 'Mul':'*', 'Shl':'<<', 'Shr':'>>'}
 
 
-def paths_to(node, value, max_depth=20, path=[], root=None, max_length=70, print_details=False):
-    """Finds the paths under node through which the value is accessible."""
-    if max_depth < 1:
-        return
+def get_table_match_type(table):
+    counter = Counter(table.key.keyElements.map('matchType.path.name'))
 
-    root = root if root is not None else node
+    table.ternary_count = counter['ternary']
+    table.lpm_count = counter['lpm']
+    table.exact_count = counter['exact']
 
-    valuetxt = str(value)
-
-    if type(node) is P4Node:
-        if hasattr(node, 'name'):
-            nodetxt = node.name
-        else:
-            nodetxt = node.str(details=False)
-    else:
-        nodetxt = str(node)
-
-    if nodetxt is not None and valuetxt in nodetxt:
-        matchtype="∊"
-        if nodetxt.startswith(valuetxt):
-            matchtype="<"
-        if nodetxt.endswith(valuetxt):
-            matchtype=">"
-        if nodetxt == valuetxt:
-            matchtype="="
-
-        print_path(path, value, root, print_details, matchtype, nodetxt)
-        return
-
-    if type(node) is list:
-        for idx, subnode in enumerate(node):
-            paths_to(subnode, value, max_depth - 1, path + [idx], root, max_length, print_details)
-        return
-
-    if type(node) is dict:
-        for key in node:
-            paths_to(node[key], value, max_depth - 1, path + [key], root, max_length, print_details)
-        return
-
-    if type(node) is not P4Node:
-        return
-
-    if node.is_vec():
-        if type(node.vec) is dict:
-            for key in sorted(node.vec.keys()):
-                paths_to(node.vec[key], value, max_depth - 1, path + [key], root, max_length, print_details)
-        else:
-            for idx, elem in enumerate(node.vec):
-                paths_to(node[idx], value, max_depth - 1, path + [idx], root, max_length, print_details)
-        return
-
-    for attr in node.xdir(show_colours=False):
-        paths_to(getattr(node, attr), value, max_depth - 1, path + [attr], root, max_length, print_details)
+    if counter['ternary']  > 1: return 'ternary'
+    if counter['lpm']      > 1: return 'ternary'
+    if counter['lpm']     == 1: return 'lpm'
+    if counter['lpm']     == 0: return 'exact'
 
 
-# TODO this shall be calculated in the HAL
-def match_type(table):
-    match_types = [k.matchType.ref.name for k in table.key.keyElements]
+def attrs_resolve_members(hlir):
+    # for m in hlir.groups.member_exprs.members:
+    #     breakpoint()
 
-    if 'ternary' in match_types:
-        return 'TERNARY'
-
-    lpm_count = match_types.count('lpm')
-
-    if lpm_count  > 1: return 'TERNARY'
-    if lpm_count == 1: return 'LPM'
-    if lpm_count == 0: return 'EXACT'
+    for can in hlir.groups.member_exprs.specialized_canonical:
+        can.expr.ref = hlir.decl_instances.get(can.expr.path.name)
+        import inspect; import pprint; pprint.PrettyPrinter(indent=4,width=999,compact=True).pprint([f"hlir_attrs.py@{inspect.getframeinfo(inspect.currentframe()).lineno}", can])
+        import inspect; import pprint; pprint.PrettyPrinter(indent=4,width=999,compact=True).pprint([f"hlir_attrs.py@{inspect.getframeinfo(inspect.currentframe()).lineno}", can.expr])
 
 
-def resolve_type_name_node(hlir16, type_name_node, parent):
-    if parent.node_type == 'P4Program':
-        return hlir16.objects.get(type_name_node.path.name)
-    elif parent.node_type == 'ConstructorCallExpression' and parent.constructedType == type_name_node:
-        return parent.type
-    elif parent.node_type == 'TypeNameExpression' and parent.typeName == type_name_node:
-        return parent.type.type
-    elif hasattr(parent, 'typeParameters'):
-        type_param = parent.typeParameters.parameters.get(type_name_node.path.name)
-        if type_param is not None:
-            return type_param
 
-    return resolve_type_name_node(hlir16, type_name_node, parent.node_parents[0][-1]);
+# def resolve_path_expression_node(hlir, path_node, parent):
+#     name = path_node.path.name
+#     resolve_lists = []
+#     current = parent
+#     while True:
+#         if current.node_type == 'P4Program':
+#             return [retval for grp in hlir.object_groups if (retval := grp.get(name))][0]
+#         if 'name' in path_node.type and hlir.news.meta.get(path_node.type.name):
+#             return hlir.allmetas
+#         if current.node_type == 'KeyElement' and current.matchType == path_node:
+#             return [mk for mks in hlir.decl_matchkinds
+#                     for mk in mks.members if mk.name == path_node.path.name][0]
 
-def resolve_path_expression_node(hlir16, path_node, parent):
-    resolve_lists = []
-    if parent.node_type == 'P4Program':
-        return hlir16.objects.get(path_node.path.name)
-    elif parent.node_type == 'KeyElement' and parent.matchType == path_node:
-        return [mk for mks in hlir16.objects.by_type('Declaration_MatchKind')
-                for mk in mks.members if mk.name == path_node.path.name][0]
-    elif parent.node_type == 'P4Parser':
-        resolve_lists.extend([parent.type.applyParams.parameters, parent.parserLocals, parent.states])
-    elif parent.node_type == 'P4Control':
-        resolve_lists.extend([parent.type.applyParams.parameters, parent.controlLocals])
-    elif parent.node_type == 'P4Action':
-        resolve_lists.append(parent.parameters.parameters)
-    elif parent.node_type == 'Type_Header':
-        resolve_lists.append(parent.fields)
+#         if current.node_type == 'P4Parser':
+#             resolve_lists.extend([current.type.applyParams.parameters, current.parserLocals, current.states])
+#         elif current.node_type == 'P4Control':
+#             resolve_lists.extend([current.type.applyParams.parameters, current.controlLocals])
+#         elif current.node_type == 'P4Action':
+#             resolve_lists.append(current.parameters.parameters)
+#         elif current.node_type == 'Type_Header':
+#             resolve_lists.append(current.fields)
 
-    for resolve_list in resolve_lists:
-        tmp_resolved = resolve_list.get(path_node.path.name)
-        if tmp_resolved is not None:
-            return tmp_resolved
+#         for resolve_list in resolve_lists:
+#             tmp_resolved = resolve_list.get(name)
+#             if tmp_resolved is not None:
+#                 return tmp_resolved
 
-    return resolve_path_expression_node(hlir16, path_node, parent.node_parents[0][-1])
+#         current = current.parent()
 
 
 def resolve_header_ref(member_expr):
-    if hasattr(member_expr, 'expression'):
+    if 'expression' in member_expr:
         return member_expr.expression.type
 
-    return member_expr.expr.ref.type.type_ref.fields.get(member_expr.member)
+    return member_expr.expr.ref.urtype.fields.get(member_expr.member)
 
 
-def attrs_type_boolean(hlir16):
+def attrs_type_boolean(hlir):
     """Add the proper .size attribute to Type_Boolean"""
 
-    for node in hlir16.all_nodes_by_type('Type_Boolean'):
+    for node in hlir.all_nodes.by_type('Type_Boolean'):
         node.size = 1
 
 
-def attrs_annotations(hlir16):
+def attrs_annotations(hlir):
     """Annotations (appearing in source code)"""
 
-    for node in hlir16.all_nodes_by_type('Annotations'):
+    hlir.sc_annotations = P4Node([])
+
+    for node in hlir.all_nodes.by_type('Annotations'):
         for annot in node.annotations:
             if annot.name in ["hidden", "name", ""]:
                 continue
-            hlir16.sc_annotations.append(annot)
+            hlir.sc_annotations.append(annot)
 
 
-def attrs_structs(hlir16):
-    for struct in hlir16.objects['Type_Struct']:
-        hlir16.set_attr(struct.name, struct)
+def resolve_type_var(hlir, type_var):
+    typeargs = type_var.parents.filter('node_type', ('Method', 'Type_Extern', 'Type_Parser')).filter(lambda n: 'typeargs' in n and type_var.name in n.typeargs).map('typeargs')
+    if len(typeargs) > 1:
+        breakpoint()
+    return typeargs[0][type_var.name] if len(typeargs) > 0 else None
 
 
-def attrs_resolve_types(hlir16):
+
+def set_typeargs(node: P4Node):
+    if (method := node).node_type == 'Method':
+        type_names = method.type.typeParameters.parameters
+        values = method.type.parameters.parameters
+    elif (parser := node).node_type == 'Type_Parser':
+        typepars = parser.typeParameters.parameters
+        apppars = parser.applyParams.parameters
+        named_apppars = apppars.filter(lambda n: n.urtype.node_type == 'Type_Name' and n.urtype.path.name in typepars.map('name'))
+
+        type_names = P4Node(sorted(typepars, key=lambda n: n.name))
+        values = P4Node(sorted(named_apppars, key=lambda n: n.type.path.name))
+    elif (extern := node).node_type == 'Type_Extern':
+        if 'parameters' not in extern:
+            extern.typeargs = {}
+            return
+        type_names = extern.typeParameters.parameters
+        values = extern.parameters.parameters
+
+    typeargs = dict(zip(type_names.map('name'), values))
+
+    if 'typeargs' in method:
+        if node.typeargs != typeargs:
+            addError('getting type arguments', f'Found differing sets of type arguments for {node.name}')
+        return
+
+    node.typeargs = typeargs
+
+
+def attrs_typeargs(hlir: P4Node):
     """Resolve all Type_Name nodes to real type nodes"""
 
-    for node in hlir16.all_nodes_by_type('Type_Name'):
-        resolved_type = resolve_type_name_node(hlir16, node, node)
-        assert resolved_type is not None # All Type_Name nodes must be resolved to a real type node
+    for extern in hlir.all_nodes.by_type('Type_Extern'):
+        for method in extern.methods:
+            method.env_node = extern
+
+    # for extern in hlir.groups.member_exprs.externs:
+    for extern in hlir.all_nodes.by_type('Type_Extern'):
+        set_typeargs(extern)
+        for method in extern.map('methods'):
+            set_typeargs(method)
+
+    for parser in hlir.all_nodes.by_type('Type_Parser'):
+        set_typeargs(parser)
+
+
+def resolve_type_name(hlir, typename_node):
+    retval = resolve_type_name2(hlir, typename_node)
+    if retval is None:
+        # breakpoint()
+        return None
+    import inspect; import pprint; pprint.PrettyPrinter(indent=4,width=999,compact=True).pprint([f"hlir_attrs.py@{inspect.getframeinfo(inspect.currentframe()).lineno}", retval])
+    if retval.node_type == 'Type_Typedef':
+        return retval
+    # if 'type' in retval or 'type_ref' in retval:
+    if retval.urtype.node_type == 'Type_Name':
+        breakpoint()
+    return retval
+
+def resolve_type_name2(hlir, typename_node):
+    # if 'name' not in typename_node.path:
+    if typename_node.path.absolute:
+        if (fld := typename_node.parent()).node_type == 'StructField':
+            if fld.name == 'parser_error':
+                return hlir.errors[0]
+            else:
+                # this is a metadata header
+                results = hlir.news.meta.flatmap('fields').filter('name', fld.name)
+                import inspect; import pprint; pprint.PrettyPrinter(indent=4,width=999,compact=True).pprint([f"hlir_attrs.py@{inspect.getframeinfo(inspect.currentframe()).lineno} R1", results])
+                if len(results) == 1:
+                    import inspect; import pprint; pprint.PrettyPrinter(indent=4,width=999,compact=True).pprint([f"hlir_attrs.py@{inspect.getframeinfo(inspect.currentframe()).lineno} single-isabs", results[0].type.path.absolute])
+                    return results[0]
+
+                results = results.filterfalse('type.path.absolute')
+                typenames = unique_everseen(results.map('type.type_ref.name'))
+                import inspect; import pprint; pprint.PrettyPrinter(indent=4,width=999,compact=True).pprint([f"hlir_attrs.py@{inspect.getframeinfo(inspect.currentframe()).lineno} R2", results])
+                import inspect; import pprint; pprint.PrettyPrinter(indent=4,width=999,compact=True).pprint([f"hlir_attrs.py@{inspect.getframeinfo(inspect.currentframe()).lineno} R3", typenames])
+                # if any(( (results[0].name, results[0].type.type_ref.name) != (r.name, r.type.type_ref.name) for r in results[1:] )):
+                if len(typenames) > 1:
+                    hdrname = typename_node.parents.filter(lambda n: n.node_type == 'Type_Struct')[0].name
+                    typenames = ', '.join(typenames)
+                    assert False, f'Metadata field {hdrname}.{fld.name} has conflicting types ({typenames})'
+                return results[0]
+
+    name = typename_node.path.name
+    parents = typename_node.parents
+
+    if (found := parents.filter('ConstructorCallExpression').filter(lambda n: n.constructedType == typename_node)):
+        return found[0].type
+
+    if (found := parents.filter('TypeNameExpression').filter(lambda n: n.typeName == typename_node)):
+        return found[0].type.type
+
+    if (found := parents.filter(lambda n: 'typeParameters' in n)) and len(found) > 0:
+        if (found := found.flatmap('typeParameters.parameters').get(name)):
+            return found
+
+    # TODO maybe this is not even needed here
+    if (found := hlir.errors.get(name)) is not None:
+        return found
+
+    resolves = [retval for grp in hlir.object_groups if (retval := grp.get(name))]
+    if len(resolves) > 1:
+        return None
+    if len(resolves) == 0:
+        return None
+
+    return resolves[0]
+
+
+def attrs_resolve_types(hlir):
+    """Resolve all Type_Name nodes to real type nodes"""
+
+    for node in hlir.all_nodes.by_type('Type_Name'):
+        resolved_type = resolve_type_name(hlir, node)
+        assert resolved_type != node
+
+        if resolved_type is None:
+            if 'name' in node:
+                addWarning('resolving type', f'Type name {node.name} could not be resolved')
+            else:
+                addWarning('resolving type', f'Type name {node} could not be resolved')
+            continue
+
+        if resolved_type.node_type == 'Type_Var':
+            resolved_type = resolve_type_var(hlir, resolved_type)
+            if resolved_type is None:
+                # here, we have to suppose that the type name is unused
+                # such as in T lookahead<T>() if the function is not called
+                continue
+
         node.type_ref = resolved_type
 
+    # TODO do it
 
-def attrs_resolve_pathexprs(hlir16):
+def check_no_leftovers(base_node, leftover_nodes, node_description):
+    if len(leftover_nodes) != 0:
+        addError(f'visiting {node_description}s', f'{len(leftover_nodes)} {node_description}s of unexpected type found')
+        import pprint; pprint.PrettyPrinter(indent=4,width=999,compact=True).pprint(["hlir_attrs.py:142 ERROR", f'{len(leftover_nodes)} {node_description}s of unexpected type found'])
+
+
+def attrs_resolve_pathexprs(hlir):
     """Resolve all PathExpression nodes"""
-    for node in hlir16.all_nodes_by_type('PathExpression'):
-        resolved_path = resolve_path_expression_node(hlir16, node, node)
-        assert resolved_path is not None # All PathExpression nodes must be resolved
-        node.ref = resolved_path
+
+    # TODO ez atkerult a masik helyre...
+
+    # for pe in hlir.groups.pathexprs.action:
+    #     import pprint; pprint.PrettyPrinter(indent=4,width=999,compact=True).pprint(["hlir_attrs.py:145 pe.hlir.action", pe])
+    #     # breakpoint()
+
+    # for pe in hlir.groups.pathexprs.io:
+    #     import pprint; pprint.PrettyPrinter(indent=4,width=999,compact=True).pprint(["hlir_attrs.py:148 pe.hlir.io", pe])
+    #     # breakpoint()
+
+    for hexpr in hlir.groups.pathexprs.header:
+        if hexpr.type.name in hlir.news.meta_types:
+            hexpr.ref = hlir.allmetas
+        import inspect; import pprint; pprint.PrettyPrinter(indent=4,width=999,compact=True).pprint([f"hlir_attrs.py@{inspect.getframeinfo(inspect.currentframe()).lineno}", hexpr])
+
+    # for pe in hlir.groups.pathexprs.state:
+    #     import pprint; pprint.PrettyPrinter(indent=4,width=999,compact=True).pprint(["hlir_attrs.py:154 pe.hlir.state", pe])
+    #     # breakpoint()
+
+    # for pe in hlir.groups.pathexprs.method:
+    #     import pprint; pprint.PrettyPrinter(indent=4,width=999,compact=True).pprint(["hlir_attrs.py:157 pe.hlir.method", pe])
+    #     # breakpoint()
+
+    # for pe in hlir.groups.pathexprs.matchkind:
+    #     import pprint; pprint.PrettyPrinter(indent=4,width=999,compact=True).pprint(["hlir_attrs.py:160 pe.hlir.matchkind", pe])
+    #     # breakpoint()
+
+    # for pe in hlir.groups.pathexprs.table:
+    #     import pprint; pprint.PrettyPrinter(indent=4,width=999,compact=True).pprint(["hlir_attrs.py:163 pe.hlir.table", pe])
+    #     # breakpoint()
+
+    for mcexpr in hlir.groups.pathexprs.under_mcall:
+        mname = mcexpr.path.name
+        mcexpr.action_ref = hlir.controls.flatmap('controlLocals').get(mname)
+        import inspect; import pprint; pprint.PrettyPrinter(indent=4,width=999,compact=True).pprint([f"hlir_attrs.py@{inspect.getframeinfo(inspect.currentframe()).lineno}", mcexpr])
+
+    # for pe in hlir.groups.pathexprs.assign:
+    #     import pprint; pprint.PrettyPrinter(indent=4,width=999,compact=True).pprint(["hlir_attrs.py:169 pe.hlir.assign", pe])
+    #     breakpoint()
+
+    pass
 
 
-def attrs_member_naming(hlir16):
+def attrs_member_naming(hlir):
     """Add naming information to nodes"""
 
-    for enum in hlir16.objects.by_type('Type_Enum'):
-        enum.c_name = 'enum_' + enum.name
+    for enum in hlir.enums:
+        enum.c_name = f'enum_{enum.name}'
         for member in enum.members:
-            member.c_name = enum.c_name + '_' + member.name
+            member.c_name = f'{enum.c_name}_{member.name}'
 
-    for error in hlir16.objects.by_type('Type_Error'):
-        error.c_name = 'error_' + error.name
+    for error in hlir.errors:
+        error.c_name = f'error_{error.name}'
         for member in error.members:
-            member.c_name = error.c_name + '_' + member.name
+            member.c_name = f'{error.c_name}_{member.name}'
 
 
-def set_annotations(hlir16, node, annots):
-    node.annotations = P4Node({})
-    node.annotations.node_type = 'Annotations'
-    node.annotations.annotations = P4Node({}, annots)
+# These have to be specified here, as the model description file gives ZERO HINTS about them
+model_specific_infos = {
+    "V1Switch": {
+        "egress_meta_fld": "egress_spec",
+        # from v1model.p4: "an implementation-specific special value that ... causes the packet to be dropped"
+        "egress_drop_value": 100,
+        "user_meta_var": "meta",
+        "meta_types": ["standard_metadata_t"],
+    },
+    "PSA_Switch": {
+        "egress_meta_fld": "egress_port",
+        "egress_drop_value": "true",
+        "user_meta_var": "user_meta",
+        "meta_types": [
+            "psa_ingress_parser_input_metadata_t",
+            "psa_egress_parser_input_metadata_t",
+            "psa_ingress_input_metadata_t",
+            "psa_ingress_output_metadata_t",
+            "psa_egress_input_metadata_t",
+            "psa_egress_deparser_input_metadata_t",
+            "psa_egress_output_metadata_t",
+        ],
+    },
+}
 
-    set_common_attrs(hlir16, node)
 
-def untypedef(f):
-    while f.node_type == "Type_Typedef":
-        f = f.type.type_ref
-    return f
+def attrs_top_level(hlir, p4_version):
+    dis = hlir.decl_instances
+
+    hlir.news = P4Node({'node_type': 'SystemInfo'})
+    hlir.news.p4v = p4_version
+    hlir.news.main = dis.get(lambda main: main.arguments.map('expression')['PathExpression'].filter(lambda arg: dis.get(arg.path.name) is not None))
+    if hlir.news.main is None:
+        hlir.news.main = dis.get(lambda main: len(main.arguments.map('expression')['ConstructorCallExpression']) > 0)
+
+    assert hlir.news.main is not None, 'Could not determine main entry point'
+
+    hlir.news.model = hlir.news.main.urtype.path.name
+
+    assert hlir.news.model is not None, 'Could not determine architecture model'
+    assert hlir.news.model in model_specific_infos, f'Main belongs to unknown package {hlir.news.main}'
+
+    infos = model_specific_infos[hlir.news.model]
+
+    hlir.news.egress_meta_fld = infos['egress_meta_fld']
+    hlir.news.egress_drop_value = infos['egress_drop_value']
+    hlir.news.user_meta_var = infos['user_meta_var']
+    hlir.news.meta_types = P4Node(infos['meta_types'])
+
+
+def attrs_regroup_structs(hlir):
+    structs = hlir.objects['Type_Struct']
+
+    meta_type_names = hlir.news.meta_types
+    hlir.news.meta = remove_nodes(structs.filter(lambda s: s.name in meta_type_names), hlir.objects)
+
+    # TODO digest etc., amibol structot kell gyartani
+    hlir.news.data = remove_nodes(hlir.objects['Type_Struct'], hlir.objects)
+    hlir.news.misc = P4Node([]) # TODO ezek mire valok? kellenek ilyenek egyaltalan?
+
+    assert (remaining := len(hlir.objects['Type_Struct'])) == 0, f'{remaining} structs are not identified'
+
+
+def attrs_regroup_members(hlir):
+    mes = hlir.all_nodes.by_type('Member')
+    # TODO metadata refs
+    # TODO fld refs
+
+    hlir.groups.member_exprs = P4Node({'node_type': 'grouped'})
+    mem_exprs = hlir.groups.member_exprs
+
+    mem_methods = mes.filter('type.node_type', 'Type_Method')
+
+    mem_path_members = mem_methods.filter(lambda m: 'member' in m)
+    mem_path_methods = mem_methods.filter(lambda m: 'path' in m.expr)
+    mem_path_pathexpressions = mes.filter('expr.node_type', 'PathExpression')
+
+    hlir.groups.member_exprs.enums = remove_nodes(mes.filter('type.node_type', 'Type_Enum'), mes)
+    hlir.groups.member_exprs.booleans = remove_nodes(mes.filter('type.node_type', 'Type_Boolean'), mes)
+    hlir.groups.member_exprs.specialized_canonical = remove_nodes(mes.filter('expr.type.node_type', 'Type_SpecializedCanonical'), mes)
+
+    hlir.groups.member_exprs.tables = remove_nodes(mem_path_methods.filter('expr.type.node_type', 'Type_Table'), mes)
+    hlir.groups.member_exprs.externs = remove_nodes(mem_path_methods.filter('expr.type.node_type', 'Type_Extern'), mes)
+
+    hlir.groups.member_exprs.headers = remove_nodes(mem_path_pathexpressions.filter('type.node_type', 'Type_Header'), mes)
+    hlir.groups.member_exprs.bits = remove_nodes(mem_path_pathexpressions.filter('type.node_type', 'Type_Bits'), mes)
+    # hlir.groups.member_exprs.methods = remove_nodes(mem_path_pathexpressions.filter('type.node_type', 'Type_Method'), mes)
+
+    hlir.groups.member_exprs.members = remove_nodes(mem_methods.filter(lambda m: 'member' in m.expr), mes)
+    hlir.groups.member_exprs.exprs = remove_nodes(mes.filter(lambda m: 'expr' in m.expr), mes)
+    hlir.groups.member_exprs.under_mcall = remove_nodes(mes.filter(lambda m: m.parent().node_type == 'MethodCallExpression'), mes)
+
+    check_no_leftovers(hlir.groups.member_exprs, mes, "member expression")
+
+    # # ctl_param_structs = hlir.controls \
+    # #     .flatmap('controlLocals') \
+    # #     .filter('node_type', 'P4Action') \
+    # #     .flatmap('body.components') \
+    # #     .filter('node_type', 'MethodCallStatement') \
+    # #     .flatmap('methodCall.arguments') \
+    # #     .filter('expression.type.node_type', 'Type_Struct') \
+    # #     .map('expression.type.name') \
+    # #     .map(lambda ctl_param_name: structs.get(ctl_param_name))
+
+    # is_miscs = [all(('name' in fld.urtype and hlir.headers.get(fld.urtype.name) for fld in hdr.fields)) for hdr in structs]
+    # # is_miscs = [all((fldname:=fld.urtype('name')) and hlir.headers.get(fldname) for fld in hdr.fields) for hdr in structs]
+    # miscs = [hdr for hdr, is_misc in zip(structs, is_miscs) if is_misc]
+    # datas = [hdr for hdr, is_misc in zip(structs, is_miscs) if not is_misc if hdr in ctl_param_structs]
+    # metas = [hdr for hdr, is_misc in zip(structs, is_miscs) if not is_misc if hdr not in ctl_param_structs]
+    # # breakpoint()
+
+
+    # make_node_group(hlir.news, 'misc', miscs, hlir.objects)
+    # make_node_group(hlir.news, 'data', datas, hlir.objects)
+    # make_node_group(hlir.news, 'meta', metas, hlir.objects)
+
+    # TODO remove this
+    hlir.object_groups = P4Node([
+        hlir.control_types,
+        hlir.controls,
+        hlir.decl_instances,
+        hlir.decl_matchkinds,
+        hlir.enums,
+        hlir.errors,
+        hlir.externs,
+        hlir.headers,
+        hlir.methods,
+        hlir.packages,
+        hlir.parsers,
+        hlir.typedefs,
+        hlir.type_parsers,
+
+        # hlir.news.misc,
+        # hlir.news.data,
+        hlir.news.meta,
+    ])
+
+
+
+
+def make_node_group(target, new_group_name, nodes, origin = None):
+    """Move the selected nodes from a vector node into a new attribute of the target node.
+    The grouped nodes are removed from the origin node if it is given."""
+    new_node = P4Node(nodes)
+    target.set_attr(new_group_name, new_node)
+    if origin is not None:
+        for node in nodes:
+            origin.vec.remove(node)
+
+
+def clear_hlir_objects(hlir):
+    """At this point, all nodes have been moved from hlir.objects.vec
+    into separate attributes of hlir.
+    Remove the unnecessary node."""
+    if len(hlir.objects) != 0:
+        addError('cleaning up', f'{len(hlir.objects)} unexpected nodes found in hlir.objects')
+
+    hlir.remove_attr('objects')
+
+
+def remove_nodes(nodes, parent):
+    for node in nodes:
+        assert node in parent, f'Node {node} could not be removed from {parent}'
+
+        parent.vec.remove(node)
+    return nodes
+
+
+def attrs_regroup_path_expressions(hlir):
+    """Makes hlir attributes for distinct kinds of structs."""
+
+    # TODO remove?
+    # ops1 = ' '.split(list(simple_binary_ops.keys()))
+    # arithmetic_types = unique_everseen(list(' '.split(simple_binary_ops.keys())) + list(' '.split(complex_binary_ops.keys())))
+
+    pes = hlir.all_nodes.by_type('PathExpression')
+
+    hlir.groups.pathexprs = P4Node({'node_type': 'grouped'})
+
+    hlir.groups.pathexprs.action = remove_nodes(pes.filter('type.node_type', 'Type_Action'), pes)
+    hlir.groups.pathexprs.io = remove_nodes(pes.filter('type.node_type', 'Type_Extern'), pes)
+    hlir.groups.pathexprs.header = remove_nodes(pes.filter('type.node_type', 'Type_Struct'), pes)
+    hlir.groups.pathexprs.state = remove_nodes(pes.filter('type.node_type', 'Type_State'), pes)
+    hlir.groups.pathexprs.method = remove_nodes(pes.filter('type.node_type', 'Type_Method'), pes)
+    hlir.groups.pathexprs.matchkind = remove_nodes(pes.filter('type.node_type', 'Type_MatchKind'), pes)
+    hlir.groups.pathexprs.table = remove_nodes(pes.filter('type.node_type', 'Type_Table'), pes)
+    hlir.groups.pathexprs.boolean = remove_nodes(pes.filter('type.node_type', 'Type_Boolean'), pes)
+    hlir.groups.pathexprs.specialized_canonical = remove_nodes(pes.filter('type.node_type', 'Type_SpecializedCanonical'), pes)
+    hlir.groups.pathexprs.package = remove_nodes(pes.filter('type.node_type', 'Type_Package'), pes)
+    hlir.groups.pathexprs.bits = remove_nodes(pes.filter('type.node_type', 'Type_Bits'), pes)
+    hlir.groups.pathexprs.arithmetic = remove_nodes(pes.filter(lambda m: (op := m.parent().node_type) in simple_binary_ops or op in complex_binary_ops), pes)
+
+    hlir.groups.pathexprs.under_mcall = remove_nodes(pes.filter(lambda m: m.parent().node_type == 'MethodCallExpression'), pes)
+    breakpoint()
+    hlir.groups.pathexprs.under_assign = remove_nodes(pes.filter(lambda m: m.parent().node_type == 'AssignmentStatement'), pes)
+    hlir.groups.pathexprs.under_keyelement = remove_nodes(pes.filter(lambda m: m.parent().node_type == 'KeyElement'), pes)
+    hlir.groups.pathexprs.under_member = remove_nodes(pes.filter(lambda m: m.parent().node_type == 'Member'), pes)
+
+    check_no_leftovers(hlir.groups.pathexprs, pes, "path expression")
+
+
+
+def attrs_regroup_attrs(hlir):
+    """Groups hlir objects by their types into hlir attributes."""
+
+    hlir.groups = P4Node({'node_type': 'groups'})
+
+    groups = [
+        ('control_types', 'Type_Control'),
+        ('controls', 'P4Control'),
+        ('decl_instances', 'Declaration_Instance'),
+        ('decl_matchkinds', 'Declaration_MatchKind'),
+        ('enums', 'Type_Enum'),
+        ('errors', 'Type_Error'),
+        ('externs', 'Type_Extern'),
+        ('headers', 'Type_Header'),
+        ('methods', 'Method'),
+        ('packages', 'Type_Package'),
+        ('parsers', 'P4Parser'),
+        # note: structs are separated using group_structs()
+        # ('structs', 'Type_Struct'),
+        ('typedefs', 'Type_Typedef'),
+        ('type_parsers', 'Type_Parser'),
+        ]
+
+    for new_group_name, node_type_name in groups:
+        make_node_group(hlir, new_group_name, hlir.objects[node_type_name], hlir.objects)
+
 
 
 def metadata_type_name_to_inst_name(mt_name):
     if mt_name == 'metadata':
         return 'meta'
+
     return re.sub(r'_t$', '', mt_name)
 
-def gen_metadata_instance_node(hlir16, metadata_type):
-    new_inst_node           = P4Node({})
-    new_inst_node.node_type = 'StructField'
-    new_inst_node.name      = metadata_type_name_to_inst_name(metadata_type.name)
-    new_inst_node.preparsed = True
-    new_inst_node.type_ref  = metadata_type
-    set_common_attrs(hlir16, new_inst_node)
-    set_annotations(hlir16, new_inst_node, [])
-    new_inst_node.type = P4Node({})
-    new_inst_node.type.node_type = 'Type_Name'
-    new_inst_node.type.path = P4Node({})
+
+def gen_metadata_instance_node(hlir, metadata_type, name, ctl):
+    new_inst_node             = P4Node({'node_type': 'StructField'})
+    new_inst_node.name        = name or metadata_type_name_to_inst_name(metadata_type.name)
+    if ctl:
+        new_inst_node.enclosing_control = ctl
+    new_inst_node.preparsed   = True
+    new_inst_node.is_metadata = True
+    new_inst_node.annotations = P4Node({'node_type': 'Annotations'})
+    new_inst_node.annotations.annotations = P4Node([])
+    new_inst_node.type = P4Node({'node_type': 'Type_Name'})
+    new_inst_node.type.path = P4Node({'node_type': 'name'})
     new_inst_node.type.path.name = metadata_type.name
     new_inst_node.type.path.absolute = True
+    new_inst_node.type.preparsed = False
     new_inst_node.type.type_ref = metadata_type
-    set_common_attrs(hlir16, new_inst_node.type)
+    metadata_type.is_metadata = True
 
-    new_inst_node.type.type_ref.fields = P4Node({}, [untypedef(f) for f in new_inst_node.type.type_ref.fields])
 
     return new_inst_node
 
 
-def known_packages():
-    return {'V1Switch', 'PSA_Switch'}
+def mcall_to_hdr(mcall):
+    return mcall.method.expr.expr.type if 'expr' in mcall.method.expr else mcall.method.expr.type
+
+def parser_or_control_parent(node):
+    return [parent for parent in node.node_parents[0] if parent.node_type in ('P4Control', 'P4Parser')][0]
+
+def metafld_name(hdr, fldname, ctr):
+    return f'{ctr.name}_{hdr.name}_{fldname}' if ctr else f"{hdr.name}_{re.sub(r'_t$', '', hdr.name)}"
+
+def make_metafld(hdr, fld, fldname, ctr):
+    metafld = P4Node({'node_type': 'StructField'})
+    metafld.name = fldname or metafld_name(hdr, fldname, ctr)
+    metafld.type = fld.type
+
+    metafld.type.path = P4Node({'node_type': 'Path'})
+    metafld.type.path.absolute = True
+
+    metafld.orig_hdr = hdr
+    metafld.orig_fld = fld
+    if ctr:
+        metafld.orig_ctr = ctr
+
+    return metafld
 
 
-def set_p4_main(hlir16):
-    for di in hlir16.objects['Declaration_Instance']:
-        bt = di.type.baseType
-
-        name = bt.type_ref.name if hasattr(bt, 'type_ref') else bt.path.name
-
-        if name in known_packages():
-            hlir16.p4_main = di
-            return
-
-
-def attrs_add_standard_metadata_t(hlir16):
-    """Adds standard metadata if it does not exist."""
-    stdmt = hlir16.objects.get('standard_metadata_t', 'Type_Struct')
-    if not stdmt:
-        stdmt           = P4Node({})
-        stdmt.node_type = 'Type_Struct'
-        stdmt.name      = "standard_metadata_t"
-        stdmt.fields    = P4Node({}, [])
-        set_common_attrs(hlir16, stdmt)
-
-        hlir16.objects.append(stdmt)
-
-
-def attrs_hdr_metadata_insts(hlir16):
-    """Package and package instance"""
-
-    pkgtype = hlir16.p4_main.type
-    package_name = hlir16.p4_model
-
-    hdr_insts = P4Node({}, pkgtype.arguments[0].type_ref.fields['StructField'])
-    set_common_attrs(hlir16, hdr_insts)
-
-    # TODO detect these programatically: these are structs that describe parameters of parsers/controls
-    known_not_metadata_structs = [
-        'headers',
-        'mac_learn_digest_t',
-        'mac_learn_digest',
-        'parsed_packet',
-    ]
-
-    metadata_types = [mt for mt in hlir16.objects['Type_Struct'] if mt.name not in known_not_metadata_structs]
-
-    metadata_insts = [gen_metadata_instance_node(hlir16, mt) for mt in metadata_types]
-
-    hlir16.metadata_insts = P4Node({}, metadata_insts)
-    set_common_attrs(hlir16, hlir16.metadata_insts)
-
-    hlir16.header_instances = P4Node({}, hdr_insts + attrs_header_refs_in_parser_locals(hlir16) + metadata_insts)
-    set_common_attrs(hlir16, hlir16.header_instances)
-    hlir16.header_instances_with_refs = P4Node({}, [hi for hi in hlir16.header_instances if hasattr(hi.type, 'type_ref')])
-    set_common_attrs(hlir16, hlir16.header_instances_with_refs)
-
-
-def attrs_header_refs_in_parser_locals(hlir16):
+def attrs_header_refs_in_parser_locals(hlir):
     """Temporary header references in parser locals"""
 
     def is_tmp_header_inst(local):
         return local.name.startswith('tmp_')
 
-    return P4Node({}, [local for parser in hlir16.objects['P4Parser'] for local in parser.parserLocals if is_tmp_header_inst(local)])
+    return P4Node([local for parser in hlir.parsers for local in parser.parserLocals if is_tmp_header_inst(local)])
+
+
+def set_header_meta_preparsed(hdr, is_meta_preparsed):
+    hdr.urtype.is_metadata = is_meta_preparsed
+    import inspect; import pprint; pprint.PrettyPrinter(indent=4,width=999,compact=True).pprint([f"hlir_attrs.py@{inspect.getframeinfo(inspect.currentframe()).lineno}", hdr])
+    import inspect; import pprint; pprint.PrettyPrinter(indent=4,width=999,compact=True).pprint([f"hlir_attrs.py@{inspect.getframeinfo(inspect.currentframe()).lineno}", hdr.urtype])
+    if 'path' not in hdr.urtype or not hdr.urtype.path.absolute:
+        for fld in hdr.urtype.fields:
+            fld.preparsed = is_meta_preparsed
+
+
+def check_meta_fields(fldinfos):
+    # TODO the same name/type combo can appear in several controls, currently treating them as one unified unit
+    # allmeta_flds = [make_metafld(hdr, fld, fldname, ctr) for hdr, fldname, ctr in metadata_infos for fld in hdr.fields]
+
+    count = Counter(fldinfos)
+    for name, typename in count:
+        if count[(name, typename)] > 1:
+            def fld_urtype_info(fld):
+                if fld.type == fld.urtype:
+                    return f'{fld.type.name}'
+                return f'{fld.type.name} (aka {fld.urtype.name})'
+            typeinfos = ''.join((f'    - {fld.name}: {fld_urtype_info(fld)}\n' for fldname, fldtype in fldinfos))
+            addError('getting metadata', f'The name {name} appears in {count[(name, typename)]} metadata fields with different types:\n{typeinfos}')
+
+def make_allmetas_node(hlir):
+    fldinfos = unique_everseen([(fld.name, fld.urtype) for hdr in hlir.news.meta for fld in hdr.fields])
+
+    check_meta_fields(fldinfos)
+
+    fldname_to_hdrfield = {fld.name: (hdr, fld) for hdr in hlir.news.meta for fld in hdr.fields}
+    allmeta_flds = [make_metafld(hdr, fld, fld.name, None) for fldname in fldname_to_hdrfield for hdr, fld in [fldname_to_hdrfield[fldname]]]
+
+    allmetas = P4Node({'node_type': 'StructField'})
+    allmetas.name = 'all_metadatas'
+    allmetas.type = P4Node({'node_type': 'Type_Name'})
+    allmetas.type.path = P4Node({'node_type': 'Path'})
+    allmetas.type.path.absolute = True
+
+    allmetas_t = P4Node({'node_type': 'Type_Header'})
+    allmetas_t.name = 'all_metadatas_t'
+    allmetas_t.fields = P4Node(allmeta_flds)
+
+    allmetas.type.type_ref = allmetas_t
+
+
+    return allmetas
+
+
+def attrs_hdr_metadata_insts(hlir):
+    """Metadata instances and header instances"""
+
+    hlir.allmetas = make_allmetas_node(hlir)
+    insts = hlir.news.data.flatmap('fields') + attrs_header_refs_in_parser_locals(hlir)
+
+    for inst in insts:
+        if not inst.type.path.absolute:
+            inst.type.type_ref = hlir.headers.get(inst.type.path.name)
+
+    set_header_meta_preparsed(hlir.allmetas, True)
+    for hdr in insts:
+        set_header_meta_preparsed(hdr, False)
+
+    hlir.headers.append(hlir.allmetas.urtype)
+
+    hlir.header_instances = P4Node(insts + [hlir.allmetas])
 
 
 def dlog(num, base=2):
@@ -342,74 +674,80 @@ def dlog(num, base=2):
     return [n for n in range(32) if num < base**n][0]
 
 
-def attrs_add_enum_sizes(hlir16):
+def attrs_add_enum_sizes(hlir):
     """Types that have members do not have a proper size (bit width) as we get it.
     We need to compute them by hand."""
-    enum_types = ['Type_Error', 'Type_Enum']
 
-    for h in hlir16.header_types:
-        for f in h.fields:
-            tref = f.canonical_type()
-            if tref.node_type not in enum_types:
-                continue
+    breakpoint()
+    # for fld in hlir.header_instances.map('urtype').filter('node_type', 'Type_Header').flatmap('fields'):
+    # for fld in hlir.header_instances.map('urtype').filter('node_type', ('Type_Error', 'Type_Enum')).flatmap('fields'):
+    for fldt in hlir.enums.map('urtype'):
+        fldt.size = dlog(len(fldt.members))
+        # TODO is this not needed?
+        # fldt.preparsed = True
+        import inspect; import pprint; pprint.PrettyPrinter(indent=4,width=999,compact=True).pprint([f"hlir_attrs.py@{inspect.getframeinfo(inspect.currentframe()).lineno}", fldt.urtype])
 
-            tref.size = dlog(len(tref.members))
-            tref.type = tref
-            # TODO is this not needed?
-            tref.preparsed = True
-
-
-def attrs_collect_header_types(hlir16):
-    """Collecting header types"""
-
-    package_name = hlir16.p4_model
-
-    # TODO metadata can be bit<x> too, is not always a struct
-    if package_name == 'V1Switch': #v1model
-        hlir16.header_types = P4Node({'id' : get_fresh_node_id(), 'node_type' : 'header_type_list'},
-                                     hlir16.objects['Type_Header'] + [h.type.type_ref for h in hlir16.metadata_insts if hasattr(h.type, "type_ref")])
-    elif package_name == 'PSA_Switch':
-        hlir16.header_types = P4Node({'id' : get_fresh_node_id(), 'node_type' : 'header_type_list'},
-                                     [h for h in hlir16.objects['Type_Header'] if 'EMPTY' not in h.name] + [h.type.type_ref for h in hlir16.metadata_insts if hasattr(h.type, "type_ref")])
-    set_common_attrs(hlir16, hlir16.header_types)
+    for fldt in hlir.errors.map('urtype'):
+        fldt.size = dlog(len(fldt.members))
 
 
-def attrs_header_types_add_attrs(hlir16):
+def attrs_header_types_add_attrs(hlir):
     """Collecting header types, part 2"""
 
-    for hdrt in hlir16.header_types:
-        hdrt.is_metadata = hdrt.node_type != 'Type_Header'
-        hdrt.id = 'header_'+hdrt.name
+    for hdrt in hlir.header_instances.map('urtype').filter(lambda hdrt: 'name' in hdrt):
+        import inspect; import pprint; pprint.PrettyPrinter(indent=4,width=999,compact=True).pprint([f"hlir_attrs.py@{inspect.getframeinfo(inspect.currentframe()).lineno}", hdrt])
+        hdrt.id = f'HDR({hdrt.name})'
         offset = 0
 
-        hdrt.bit_width   = sum([f.canonical_type().size for f in hdrt.fields])
-        hdrt.byte_width  = bits_to_bytes(hdrt.bit_width)
-        is_vw = False
-        for f in hdrt.fields:
-            tref = f.canonical_type()
+        import inspect; import pprint; pprint.PrettyPrinter(indent=4,width=999,compact=True).pprint([f"hlir_attrs.py@{inspect.getframeinfo(inspect.currentframe()).lineno}", hdrt])
+        for idx, (ff,tt) in enumerate(zip(hdrt.fields, hdrt.fields.map('urtype'))):
+            import inspect; import pprint; pprint.PrettyPrinter(indent=4,width=999,compact=True).pprint([f"hlir_attrs.py@{inspect.getframeinfo(inspect.currentframe()).lineno}", idx, ff, tt, 'size' not in tt])
+        if hdrt.name == 'all_metadatas_t':
+            breakpoint()
+        hdrt.size = sum((fld.urtype.size for fld in hdrt.fields))
+        hdrt.byte_width = (hdrt.size+7) // 8
 
-            f.id = 'field_{}_{}'.format(hdrt.name, f.name)
+        for f in hdrt.fields:
+            tref = f.urtype
+
+            if 'name' in f:
+                f.id = f'FLD({hdrt.name},{f.name})'
             # TODO bit_offset, byte_offset, mask
             f.offset = offset
             f.size = tref.size
             f.is_vw = (tref.node_type == 'Type_Varbits') # 'Type_Bits' vs. 'Type_Varbits'
-            f.preparsed = False #f.name == 'ttl'
 
             offset += f.size
-            is_vw |= f.is_vw
-        hdrt.is_vw = is_vw
 
-    for hdr in hlir16.header_instances:
-        hdr.id = re.sub(r'\[([0-9]+)\]', r'_\1', "header_instance_"+hdr.name)
+        hdrt.is_vw = any(hdrt.fields.map('is_vw'))
+
+    for hdr in hlir.header_instances:
+        hdr.id = re.sub(r'\[([0-9]+)\]', r'_\1', f"HDR({hdr.name})")
 
 
-def set_table_key_attrs(hlir16, table):
+table_key_match_order = ['exact', 'lpm', 'ternary']
+
+
+def set_table_key_attrs(hlir, table):
+    # TODO remove debug info
     for k in table.key.keyElements:
-        k.match_type = k.matchType.ref.name
+        expr = k.expression.expr
+        for gname in ["action", "bits", "header", "io", "matchkind", "method", "specialized_canonical", "state", "table", "under_mcall", "under_member"]:
+            if expr in hlir.groups.pathexprs.get_attr(gname):
+                import inspect; import pprint; pprint.PrettyPrinter(indent=4,width=999,compact=True).pprint([f"hlir_attrs.py@{inspect.getframeinfo(inspect.currentframe()).lineno} --> hlir.groups.pathexprs.{gname}", expr])
+                break
 
-        expr = k.expression.get_attr('expr')
-        if expr is None:
+    for k in table.key.keyElements:
+        expr = k.expression.expr
+        if not expr:
+            # the key element is a local variable in a control
+            k.size = table.control.controlLocals.get(k.expression.path.name).urtype.size
+            import inspect; import pprint; pprint.PrettyPrinter(indent=4,width=999,compact=True).pprint([f"hlir_attrs.py@{inspect.getframeinfo(inspect.currentframe()).lineno}", k.size])
             continue
+
+        k.match_order = table_key_match_order.index(k.matchType.path.name)
+
+        import inspect; import pprint; pprint.PrettyPrinter(indent=4,width=999,compact=True).pprint([f"hlir_attrs.py@{inspect.getframeinfo(inspect.currentframe()).lineno}", expr])
 
         # supposing that k.expression is of form '<header_name>.<name>'
         if expr.node_type == 'PathExpression':
@@ -419,108 +757,97 @@ def set_table_key_attrs(hlir16, table):
         elif expr.node_type == 'Member':
             k.header_name = expr.member
             k.field_name = k.expression.member
-        k.match_type = k.matchType.ref.name
-        k.id = 'field_instance_' + k.header_name + '_' + k.field_name
-
-        k.header = hlir16.header_instances.get(k.header_name)
-
-        if k.header is None:
-            # TODO seems to happen for some PathExpressions
-            continue
-
-        size = k.get_attr('size')
-
-        if size is None:
-            kfld = k.header.type.type_ref.fields.get(k.field_name).canonical_type()
-            k.width = kfld.size
         else:
-            k.width = size
+            addWarning("Table key analysis", "Key not found")
+
+        k.id = f'FLD({k.header_name},{k.field_name})'
+        k.header = hlir.header_instances.get(k.header_name)
+        if k.header is None and (fld := hlir.allmetas.urtype.fields.get(k.field_name)):
+            k.header = hlir.allmetas
+            k.size = fld.size
+
+        if 'size' not in k:
+            breakpoint()
+            k.size = k.header.urtype.fields.get(k.field_name).urtype.size
 
 
-def get_meta_instance(hlir16, metaname):
-    # Note: here we suppose that the field names look like this: _<metainst type><possible generated metainst index>_<field name><generated metafield index>
-    maybe_meta = [(mi, fld) for mi in hlir16.metadata_insts for fld in mi.type.type_ref.fields if re.match("^_{}[0-9]*_{}[0-9]+$".format(mi.name, fld.name), metaname)]
-    if len(maybe_meta) == 0:
-        addError("finding metadata field", "Could not find metadata field {}".format(metaname))
-    if len(maybe_meta) > 1:
-        addError("finding metadata field", "Metadata field {} is ambiguous, {} candidates are: {}".format(metaname, len(maybe_meta), ", ".join(["({};{})".format(mi.name, fld.name) for mi, fld in maybe_meta])))
-    return maybe_meta[0]
+def get_meta_instance(hlir, metaname):
+    return hlir.allmetas, f'all_metadatas_{metaname}'
 
 
-def key_length(hlir16, keyelement):
+def key_length(hlir, keyelement):
     expr = keyelement.expression.get_attr('expr')
     if expr is None:
         return keyelement.expression.type.size
 
     if expr.type.name == 'metadata':
-        meta_inst, _ = get_meta_instance(hlir16, keyelement.field_name)
+        keyelement.header = hlir.allmetas
+        if 'size' not in keyelement:
+            keyelement.size = hlir.allmetas.urtype.fields.get(metaname).urtype.size
 
-        keyelement.header = meta_inst
-
-        # TODO is there a better place to set .width for a metadata?
-        bit_width = meta_inst.type.type_ref.bit_width
-
-        keyelement.width = bit_width
-        keyelement.bit_width = bit_width
-        keyelement.byte_width = (bit_width+7)/8
-
-        return bit_width
-
-    keyelement.header = hlir16.header_instances.get(keyelement.header_name)
-
-    return keyelement.width if keyelement.header is not None else 0
+    keyelement.header = hlir.header_instances.get(keyelement.header_name)
+    return keyelement.size if keyelement.header is not None else 0
 
 
-def table_key_length(hlir16, table):
-    return sum((key_length(hlir16, keyelement) for keyelement in table.key.keyElements))
+def table_key_length(hlir, table):
+    return sum((key_length(hlir, keyelement) for keyelement in table.key.keyElements))
 
 
-def attrs_controls_tables(hlir16):
-    hlir16.control_types = hlir16.objects['Type_Control']
-    hlir16.controls = hlir16.objects['P4Control']
+def add_attr_named_actions(table):
+    named_actions = []
+    for a in table.actions:
+        name_parts = a.action_object.annotations.annotations('name').expr
+        if not name_parts:
+            continue
+        a.name = name_parts[0].value.rsplit(".")[-1]
+        named_actions.add(a)
+    table.named_actions = P4Node(named_actions)
 
-    for c in hlir16.objects['P4Control']:
-        c.tables = P4Node({}, c.controlLocals['P4Table'])
-        set_common_attrs(hlir16, c.tables)
+
+def attrs_controls_tables(hlir):
+    for c in hlir.controls:
+        c.tables = P4Node(c.controlLocals['P4Table'])
         for t in c.tables:
             t.control = c
-        c.actions = P4Node({}, c.controlLocals['P4Action'])
-        set_common_attrs(hlir16, c.actions)
+        c.actions = P4Node(c.controlLocals['P4Action'])
 
-    main = hlir16.p4_main
+    main = hlir.news.main
     pipeline_elements = main.arguments
 
-    hlir16.tables = P4Node({}, [table for ctrl in hlir16.controls for table in ctrl.controlLocals['P4Table']])
-    set_common_attrs(hlir16, hlir16.tables)
+    hlir.tables = P4Node([table for ctrl in hlir.controls for table in ctrl.tables])
 
-    for table in hlir16.tables:
+    for table in hlir.tables:
         for prop in table.properties.properties:
             table.set_attr(prop.name, prop.value)
         table.remove_attr('properties')
 
-    package_name = hlir16.p4_model
+    package_name = hlir.news.model
 
-    for c in hlir16.controls:
-        for t in c.tables:
-            for a in t.actions.actionList:
-                a.action_object = a.expression.method.ref
-            t.actions = P4Node({}, t.actions.actionList)
-            set_common_attrs(hlir16, t.actions)
+    for ctl in hlir.controls:
+        for table in ctl.tables:
+            for act in table.actions.actionList:
+                act.action_object = table.control.actions.get(act.expression.method.path.name)
 
-    for table in hlir16.tables:
-        if not hasattr(table, 'key'):
-            continue
+            table.actions = P4Node(table.actions.actionList)
+            add_attr_named_actions(table)
 
-        table.match_type = match_type(table)
+    # keyless tables are turned into empty-key tables
+    for table in hlir.tables:
+        if 'key' not in table:
+            table.key = P4Node({'node_type': 'Key'})
+            table.key.keyElements = P4Node([])
 
-        set_table_key_attrs(hlir16, table)
+    for table in hlir.tables:
+        table.matchType = get_table_match_type(table)
 
-    for table in hlir16.tables:
-        table.key_length_bits  = table_key_length(hlir16, table) if hasattr(table, 'key') else 0
-        table.key_length_bytes = bits_to_bytes(table.key_length_bits)
+        set_table_key_attrs(hlir, table)
+
+    for table in hlir.tables:
+        table.key_length_bits = table_key_length(hlir, table)
+        table.key_length_bytes = (table.key_length_bits+7) // 8
 
 
-def attrs_extract_node(hlir16, node, method):
+def attrs_extract_node(hlir, node, method):
     arg0 = node.methodCall.arguments[0]
 
     node.call   = 'extract_header'
@@ -532,151 +859,97 @@ def attrs_extract_node(hlir16, node, method):
         node.width = node.methodCall.arguments[1]
 
 
-def attrs_extract_nodes(hlir16):
-    for node, method in find_extract_nodes(hlir16):
-        attrs_extract_node(hlir16, node, method)
+def attrs_extract_nodes(hlir):
+    for mcall in hlir.all_nodes.by_type('MethodCallStatement'):
+        method = mcall.methodCall.method
+        if method('expr.path.name') == 'packet' and method.member == 'extract':
+            attrs_extract_node(hlir, mcall, method)
 
 
-def get_children(node, f = lambda n: True, visited=[]):
-    if node in visited:
-        return []
-
-    children = []
-    new_visited = visited + [node]
-    if f(node):
-        children.append(node)
-
-    if type(node) is list:
-        for _, subnode in enumerate(node):
-            children.extend(get_children(subnode, f, new_visited))
-    elif type(node) is dict:
-        for key in node:
-            children.extend(get_children(node[key], f, new_visited))
-
-    if type(node) != P4Node:
-        return children
-
-    if node.is_vec():
-        for idx, _ in enumerate(node.vec):
-            children.extend(get_children(node[idx], f, new_visited))
-
-    for attr in node.xdir(show_colours=False):
-        children.extend(get_children(getattr(node, attr), f, new_visited))
-
-    return children
-
-
-def find_extract_nodes(hlir16):
-    """Collect more information for packet_in method calls"""
-
-    for block_node in hlir16.objects['P4Parser']:
-        for block_param in block_node.type.applyParams.parameters:
-            if block_param.type.type_ref.name != 'packet_in':
-                continue
-
-            # TODO step takes too long, as it iterates through all children
-            for node in get_children(block_node, lambda n: type(n) is P4Node and hasattr(n, 'node_type') and n.node_type == 'MethodCallStatement'):
-                method = node.methodCall.method
-                if not hasattr(method, 'expr') or not hasattr(method.expr, 'ref'):
-                    # TODO investigate this case further
-                    # TODO happens in test-checksum
-                    continue
-                    
-                if (method.node_type, method.expr.node_type, method.expr.ref.name) != ('Member', 'PathExpression', block_param.name):
-                    continue
-
-                if method.member == 'extract':
-                    assert(len(method.type.parameters.parameters) in {1, 2})
-
-                    yield (node, method)
-                elif method.member in {'lookahead', 'advance', 'length'}:
-                    raise NotImplementedError('packet_in.{} is not supported yet!'.format(method.member))
-                else:
-                    assert False #The only possible method calls on packet_in are extract, lookahead, advance and length
-
-
-def attrs_header_refs_in_exprs(hlir16):
+def attrs_header_refs_in_exprs(hlir):
     """Header references in expressions"""
 
-    for member in hlir16.all_nodes_by_type('Member'):
-        if not hasattr(member.expr, "ref"):
-            # TODO should these nodes also be considered here?
-            continue
+    member_nodes = hlir.all_nodes.by_type('Member')
+    no_externs = member_nodes.filterfalse('expr.type.node_type', 'Type_Extern')
 
-        def with_ref(node):
-            return node.type_ref if hasattr(node, "type_ref") else node
+    hlir.node_groups = P4Node({'node_type': 'NodeGroup'})
+    hlir.node_groups.members = P4Node({'node_type': 'NodeGroup'})
 
-        if not hasattr(member.expr.ref, "type"):
-            # TODO should these nodes also be considered here?
-            continue
+    members = hlir.node_groups.members
+    make_node_group(members, 'headers', no_externs.filter('type.node_type', 'Type_Header'))
+    make_node_group(members, 'members', no_externs.not_of(members.headers).filter('expr.node_type', 'Member'))
+    make_node_group(members, 'paths', no_externs.not_of(members.headers).filter('expr.node_type', 'PathExpression'))
 
-        member_type = with_ref(member.expr.ref.type)
+    rest = no_externs.not_of(members.headers)
 
-        if (member.expr.node_type, member.expr.ref.node_type, member_type.node_type) != ('PathExpression', 'Parameter', 'Type_Struct'):
-            continue
+    if len(stacks := member_nodes.filter('type.node_type', 'Type_Stack')) > 0:
+        breakpoint()
+        raise NotImplementedError(f"Some headers ({', '.join(stacks.map('name'))}) are header stacks which are currently not supported")
 
-        if member_type in hlir16.header_types:
-            member.expr.header_ref = hlir16.header_instances.get(member.expr.ref.name)
-        elif with_ref(member_type.fields.get(member.member).type) in hlir16.header_types:
-            member.header_ref = resolve_header_ref(member)
-        elif member_type.name == 'metadata':
-            member.header_ref = member.expr.type
-        elif member.expr.path.name == 'standard_metadata':
-            member.header_ref = hlir16.metadata_insts.get('standard_metadata').type
-        elif member.type.node_type == 'Type_Stack':
-            raise NotImplementedError('Header stacks are currently not supported')
-        else:
-            raise NotImplementedError('Unable to resolve header reference: {}.{} ({})'.format(member.expr.type.name, member.member, member))
+    for member in members.headers:
+        mexpr = member.expr
+        mtype = mexpr.urtype
+        mname = member.member
+        tname = member.type.name
 
+        member.header_ref = hlir.header_instances.filter('urtype.name', tname).get(mname)
+        mexpr.header_ref = member.header_ref
 
-def attrs_add_metadata_refs(hlir16):
-    for expr in hlir16.all_nodes_by_type('PathExpression'):
-        if expr.path.name == 'standard_metadata':
-            expr.header_ref = hlir16.metadata_insts.get('standard_metadata').type
-
-    for expr in hlir16.all_nodes_by_type('Member'):
-        if expr('header_ref.name') == 'metadata':
-            meta_inst, fld = get_meta_instance(hlir16, expr.member)
-            expr.header_ref = meta_inst
-            expr.field_name = fld.name
-
-    for ke in hlir16.all_nodes_by_type('KeyElement'):
-        if ke('header_name') == 'meta':
-            meta_inst, fld = get_meta_instance(hlir16, ke.field_name)
-            ke.header_ref = meta_inst
-            ke.field_name = fld.name
+    for member in members.members:
+        mexpr = member.expr
+        mtype = mexpr.urtype
+        mname = member.member
+        breakpoint()
 
 
-def attrs_field_refs_in_exprs(hlir16):
-    """Field references in expressions"""
+        # hdr, fld = [(hdr, fld) for hdr in hlir.news.meta for fld in hdr.fields if fld.name == member.expr.member if 'name' in fld.urtype and (name := fld.urtype.name) == mtype.name][0]
 
-    for member in hlir16.all_nodes_by_type('Member'):
-        if hasattr(member.expr, 'path') and member.expr.path.name == 'standard_metadata':
-            member.field_ref = hlir16.objects.get('standard_metadata_t', 'Type_Struct').fields.get('egress_port', 'StructField')
-            continue
+        member.header_ref = hlir.headers.get(mtype.name)
+        member.field_ref = member.header_ref.fields.get(mname)
 
-        if not hasattr(member.expr, 'header_ref'):
-            continue
-        if member.expr.header_ref is None:
-            continue
-
-        ref = member.expr.header_ref.type.type_ref.fields.get(member.member, 'StructField')
-
-        if ref is not None:
-            member.field_ref = ref
+        mexpr.header_ref = member.header_ref
+        mexpr.field_ref = member.field_ref
 
 
-def set_top_level_attrs(hlir16, p4_version):
-    hlir16.p4v = p4_version
-    hlir16.sc_annotations = P4Node({}, [])
-    hlir16.all_nodes_by_type = (lambda t: P4Node({}, [n for idx in hlir16.all_nodes for n in [hlir16.all_nodes[idx]] if type(n) is P4Node and n.node_type == t]))
+# def attrs_add_metadata_refs(hlir):
+#     for expr in hlir.all_nodes.by_type('PathExpression'):
+#         if expr.path.name == 'standard_metadata':
+#             expr.header_ref = hlir.allmetas
+#             expr.type = hlir.allmetas
+#         else:
+#             import pprint; pprint.PrettyPrinter(indent=4,width=999,compact=True).pprint(["hlir_attrs.py:621 expr", expr])
+#     breakpoint()
+
+#     for expr in hlir.all_nodes.by_type('Member'):
+#         if expr('header_ref.name') == 'metadata':
+#             _, metaname = get_meta_instance(hlir, expr.member)
+#             expr.header_ref = hlir.allmetas
+#             expr.field_name = metaname
+
+#     for ke in hlir.all_nodes.by_type('KeyElement'):
+#         if ke('header_name') == 'meta':
+#             _, metaname = get_meta_instance(hlir, ke.field_name)
+#             ke.header_ref = hlir.allmetas
+#             ke.field_name = metaname
 
 
-def set_common_attrs(hlir16, node):
-    # Note: the external lambda makes sure the actual node is the operand,
-    # not the last value that the "node" variable takes
-    node.paths_to = (lambda n: lambda value, print_details=False: paths_to(n, value, print_details=print_details))(node)
-    node.by_type  = (lambda n: lambda typename: P4Node({}, [f for f in hlir16.objects if f.node_type in [typename, 'Type_' + typename]]))(node)
+# def attrs_field_refs_in_exprs(hlir):
+#     """Field references in expressions"""
+
+#     for member in hlir.all_nodes.by_type('Member'):
+#         if 'path' in member.expr and member.expr.path.name == 'standard_metadata':
+#             member.field_ref = hlir.news.meta.get('standard_metadata_t').fields.get('egress_port', 'StructField')
+#             continue
+
+#         if 'header_ref' not in member.expr:
+#             continue
+#         if member.expr.header_ref is None:
+#             continue
+
+#         ref = member.expr.header_ref.urtype.fields.get(member.member, 'StructField')
+
+#         if ref is not None:
+#             member.field_ref = ref
 
 
 def unique_list(l):
@@ -696,26 +969,23 @@ def get_smems(smem_type, tables):
         if get_ctrlloc_smem_type(loc) == smem_type])
 
 
-def get_registers(hlir16):
-    return [r for r in hlir16.objects['Declaration_Instance'] if r.type.baseType.path.name == 'register']
+def get_registers(hlir):
+    return [r for r in hlir.decl_instances if r.type.baseType.path.name == 'register']
 
 
 # In v1model, all software memory cells are represented as 32 bit integers
 def smem_repr_type(smem):
-    if smem.is_signed:
-        tname = "int"
-    else:
-        tname = "uint"
+    tname = "int" if smem.is_signed else "uint"
 
     for w in [8,16,32,64]:
-        if smem.bit_width <= w:
-            return "register_" + tname + str(w) + "_t"
+        if smem.size <= w:
+            return f"register_{tname}{w}_t"
 
     return "NOT_SUPPORTED"
 
 
 def smem_components(smem):
-    smem.bit_width = smem.type.arguments[0].size if smem.smem_type == "register" else 32
+    smem.size = smem.type.arguments[0].size if smem.smem_type == "register" else 32
     smem.is_signed = smem.type.arguments[0].isSigned if smem.smem_type == "register" else False
     if smem.smem_type not in ["direct_counter", "direct_meter"]:
         smem.amount = smem.arguments['Argument'][0].expression.value
@@ -727,15 +997,15 @@ def smem_components(smem):
 
     member = [s.expression for s in smem.arguments if s.expression.node_type == 'Member'][0]
 
-    # TODO set these in hlir16_attrs
+    # TODO set these in hlir_attrs
     smem.packets_or_bytes = member.member
     smem.smem_for = {
         "packets": smem.packets_or_bytes in ("packets", "packets_and_bytes"),
         "bytes":   smem.packets_or_bytes in (  "bytes", "packets_and_bytes"),
     }
 
-    pkts_name  = "{}_{}_packets".format(smem.smem_type, smem.name)
-    bytes_name = "{}_{}_bytes".format(smem.smem_type, smem.name)
+    pkts_name  = f"{smem.smem_type}_{smem.name}_packets"
+    bytes_name = f"{smem.smem_type}_{smem.name}_bytes"
 
     pbs = {
         "packets":           [{"for": "packets", "type": base_type, "name": pkts_name}],
@@ -746,141 +1016,104 @@ def smem_components(smem):
     }
 
     return pbs[smem.packets_or_bytes]
-def attrs_stateful_memory(hlir16):
+
+
+def attrs_stateful_memory(hlir):
     # direct counters
-    for table in hlir16.tables:
-        table.direct_meters    = P4Node({}, unique_list([m for t, m in get_smems('direct_meter', [table])]))
-        set_common_attrs(hlir16, table.direct_meters)
-        table.direct_counters  = P4Node({}, unique_list([c for t, c in get_smems('direct_counter', [table])]))
-        set_common_attrs(hlir16, table.direct_counters)
+    for table in hlir.tables:
+        table.direct_meters    = P4Node(unique_list([m for t, m in get_smems('direct_meter', [table])]))
+        table.direct_counters  = P4Node(unique_list([c for t, c in get_smems('direct_counter', [table])]))
 
     # indirect counters
-    hlir16.meters    = P4Node({}, unique_list(get_smems('meter', hlir16.tables)))
-    set_common_attrs(hlir16, hlir16.meters)
-    hlir16.counters  = P4Node({}, unique_list(get_smems('counter', hlir16.tables)))
-    set_common_attrs(hlir16, hlir16.counters)
-    hlir16.registers = P4Node({}, unique_list(get_registers(hlir16)))
-    set_common_attrs(hlir16, hlir16.registers)
+    hlir.meters    = P4Node(unique_list(get_smems('meter', hlir.tables)))
+    hlir.counters  = P4Node(unique_list(get_smems('counter', hlir.tables)))
+    hlir.registers = P4Node(unique_list(get_registers(hlir)))
 
-    hlir16.all_meters   = P4Node({}, unique_list(hlir16.meters   + [(t, m) for t in hlir16.tables for m in t.direct_meters]))
-    set_common_attrs(hlir16, hlir16.all_meters)
-    hlir16.all_counters = P4Node({}, unique_list(hlir16.counters + [(t, c) for t in hlir16.tables for c in t.direct_counters]))
-    set_common_attrs(hlir16, hlir16.all_counters)
+    hlir.all_meters   = P4Node(unique_list(hlir.meters   + [(t, m) for t in hlir.tables for m in t.direct_meters]))
+    hlir.all_counters = P4Node(unique_list(hlir.counters + [(t, c) for t in hlir.tables for c in t.direct_counters]))
 
-    for _table, smem in hlir16.all_meters + hlir16.all_counters:
+    for _table, smem in hlir.all_meters + hlir.all_counters:
         smem.smem_type  = smem.type._baseType.path.name
         smem.components = smem_components(smem)
-    for smem in hlir16.registers:
+    for smem in hlir.registers:
         smem.smem_type  = smem.type._baseType.path.name
         smem.components = smem_components(smem)
 
 
-def attrs_typedef(hlir16):
-    for typedef in hlir16.all_nodes_by_type('Type_Typedef'):
-        if hasattr(typedef, 'size'):
+def attrs_typedef(hlir):
+    for typedef in hlir.all_nodes.by_type('Type_Typedef'):
+        if 'size' in typedef:
             continue
 
-        if not hasattr(typedef.type, 'type_ref'):
+        if 'type_ref' not in typedef.type:
             typedef.size = typedef.type.size
-        elif hasattr(typedef.type.type_ref, 'size'):
-            typedef.size = typedef.type.type_ref.size
+        elif 'size' in typedef.urtype:
+            typedef.size = typedef.urtype.size
 
 
-def find_p4_nodes(hlir16):
-    for idx in hlir16.all_nodes:
-        node = hlir16.all_nodes[idx]
-        if type(node) is not P4Node:
-            continue
+# def attrs_add_meta_field(hlir, metainst_type, name, size):
+#     """P4 documentation suggests using magic numbers as egress ports:
+#     const PortId DROP_PORT = 0xF;
+#     As these constants do not show up in the JSON representation,
+#     they cannot be present in HLIR.
+#     This function is used to add the 'drop' field to the standard_metadata header as a temporary fix.
+#     Other required, but not necessarily present fields can be added as well."""
 
-        yield node
+#     if metainst_type.fields.get(name) is not None:
+#         return
 
+#     new_field           = P4Node({'node_type': 'StructField'})
+#     new_field.name      = name
+#     new_field.annotations = P4Node({'node_type': 'Annotations'})
+#     new_field.annotations.annotations = P4Node([])
+#     new_field.type      = P4Node({'node_type': 'Type_Bits'})
+#     new_field.type.isSigned  = False
+#     new_field.type.size      = size
 
-def attrs_add_field_to_standard_metadata(hlir16, name, size):
-    """P4 documentation suggests using magic numbers as egress ports:
-    const PortId DROP_PORT = 0xF;
-    As these constants do not show up in the JSON representation,
-    they cannot be present in HLIR.
-    This function is used to add the 'drop' field to the standard_metadata header as a temporary fix.
-    Other required, but not necessarily present fields can be added as well."""
-
-    mi = hlir16.metadata_insts.get('standard_metadata', 'StructField')
-    mit = mi.type.type_ref
-
-    if name in [f.name for f in mit.fields]:
-        return
-
-    new_field           = P4Node({})
-    new_field.node_type = 'StructField'
-    new_field.name      = name
-    set_common_attrs(hlir16, new_field)
-    set_annotations(hlir16, new_field, [])
-    # new_field.is_vw     = False
-    # new_field.preparsed = False
-    # new_field.size      = 1
-    new_field.type      = P4Node({})
-    new_field.type.node_type = 'Type_Bits'
-    new_field.type.isSigned  = False
-    new_field.type.size      = size
-    set_common_attrs(hlir16, new_field.type)
-
-    mit.fields.append(new_field)
+#     metainst_type.fields.append(new_field)
 
 
-def set_p4_model(hlir16):
-    package_instance = hlir16.p4_main
-    pkgtype = package_instance.type
-    bt = pkgtype.baseType
-    hlir16.p4_model = bt.type_ref.name if hasattr(bt, 'type_ref') else bt.path.name
 
-
-def check_is_model_supported(hlir16):
-    """Returns whether the loaded model is supported."""
-
-    package_name = hlir16.p4_model
-    if package_name not in known_packages():
-        raise NotImplementedError('Unsupported model: {}'.format(package_name))
-
-
-def default_attr_funs():
+def default_attr_funs(p4_version):
     return [
+        attrs_regroup_attrs,
+        lambda hlir: attrs_top_level(hlir, p4_version),
+        attrs_regroup_structs,
+        attrs_regroup_members,
+        attrs_regroup_path_expressions,
+        clear_hlir_objects,
+
+        attrs_hdr_metadata_insts,
+
         attrs_type_boolean,
         attrs_annotations,
-        attrs_structs,
+        attrs_typeargs,
+
+        attrs_resolve_members,
         attrs_resolve_types,
-        attrs_resolve_pathexprs,
+
         attrs_member_naming,
-        attrs_add_standard_metadata_t,
-        attrs_hdr_metadata_insts,
-        lambda hlir16: attrs_add_field_to_standard_metadata(hlir16, "drop", 1),
-        lambda hlir16: attrs_add_field_to_standard_metadata(hlir16, "egress_spec", 32),
-        attrs_collect_header_types,
+        # lambda hlir: attrs_add_meta_field(hlir, hlir.news.meta.get('standard_metadata_t'), "drop", 1),
+        # lambda hlir: attrs_add_meta_field(hlir, hlir.news.meta.get('standard_metadata_t'), "egress_spec", 32),
+
         attrs_add_enum_sizes,
         attrs_header_types_add_attrs,
+
+        attrs_resolve_pathexprs,
+
         attrs_controls_tables,
         attrs_extract_nodes,
         attrs_header_refs_in_exprs,
-        attrs_field_refs_in_exprs,
+        # attrs_field_refs_in_exprs,
         attrs_stateful_memory,
         attrs_typedef,
-        attrs_add_metadata_refs,
+        # attrs_add_metadata_refs,
     ]
 
-def set_additional_attrs(hlir16, p4_version, additional_attr_funs = None):
-    if additional_attr_funs is None:
-        additional_attr_funs = default_attr_funs()
+def set_additional_attrs(hlir, p4_version, additional_attr_funs = None):
+    for attrfun in additional_attr_funs or default_attr_funs(p4_version):
+        attrfun(hlir)
 
-    set_top_level_attrs(hlir16, p4_version)
+    breakpoint()
 
-    set_p4_main(hlir16)
-    set_p4_model(hlir16)
-
-    check_is_model_supported(hlir16)
-
-    for node in find_p4_nodes(hlir16):
-        set_common_attrs(hlir16, node)
-
-    for attrfun in additional_attr_funs:
-        attrfun(hlir16)
-
-    return hlir16
-
+    return hlir
