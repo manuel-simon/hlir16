@@ -1,44 +1,34 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
+# SPDX-License-Identifier: Apache-2.0
 # Copyright 2017 Eotvos Lorand University, Budapest, Hungary
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
 
 import pkgutil
 import types
+import collections
+from itertools import dropwhile, chain, groupby
 
-extra_node_id = -1000
+extra_node_id = -1
 
-clr_attrname = 'green'
-clr_attrmul = 'red'
-clr_nodeid = 'magenta'
-clr_nodetype = 'cyan'
-clr_value = 'yellow'
-clr_extrapath = 'magenta'
-clr_off = 'grey'
-clr_function = 'magenta'
+is_using_colours = pkgutil.find_loader('colored')
+if pkgutil.find_loader('colored'):
+    from colored import fg, bg, attr
 
-is_using_colours = pkgutil.find_loader('termcolor')
-if pkgutil.find_loader('termcolor'):
-    from termcolor import colored
+    clr_attrname = fg('green')
+    clr_count = fg('red')
+    clr_nodeid = fg('magenta')
+    clr_nodetype = fg('cyan')
+    clr_value = fg('yellow')
+    clr_extrapath = fg('magenta_2a')
+    clr_off = fg('light_gray') + bg('dark_blue')
+    clr_function = fg('magenta')
 
 
 def _c(txt, colour, show_colours=True):
     if not is_using_colours or not show_colours:
         return txt
-    return colored(txt, colour)
+    return f'{colour}{txt}{attr("reset")}'
 
 
 def get_fresh_node_id():
@@ -47,13 +37,163 @@ def get_fresh_node_id():
     return extra_node_id
 
 
+def path_parts(root, path):
+    current_node = root
+    for elem in path:
+        if type(elem) is not int:
+            current_node = current_node.get_attr(elem)
+            yield f".{elem}"
+        else:
+            if type(current_node) is list:
+                subnode = current_node[elem]
+                next_node = current_node[elem]
+            else:
+                subnode = current_node.vec[elem]
+                next_node = current_node.vec[elem]
+
+            if type(current_node) is P4Node and type(subnode) is P4Node:
+                if not all(type(vecnode) is P4Node and type(vecnode) == type(subnode) for vecnode in current_node[subnode.node_type].vec):
+                    idx = current_node[subnode.node_type].vec.index(subnode)
+                    yield f"['{subnode.node_type}'][{idx}]"
+                else:
+                    yield f"[{elem}]"
+            else:
+                yield f"[{elem}]"
+            current_node = next_node
+
+def print_path(pathinfo, root, max_length=70, max_width=30):
+    path, matchtype, nodetxt, _node = pathinfo
+    path_txt = ''.join(path_parts(root, path)) or "(the node itself)"
+    nodetxt = nodetxt or ""
+    print(f'{nodetxt:{max_width}} {matchtype} {path_txt}')
+
+
+def first_n(g, max_count):
+    """Runs a generator for at most max_count steps."""
+    count = 1
+    for item in g:
+        if count == max_count:
+            return
+        yield item
+        count += 1
+
+
+def paths_to(root, node_or_value, sort_by_path_length=False, max_length=70):
+    """Sorts using path text by default."""
+    found_paths = _paths_to_recurse(root, node_or_value)
+
+    first100 = list(first_n(found_paths, 256))
+    max_width = max(1, max((len(nodetxt or "") for _, _, nodetxt, _ in first100), default=30))
+
+    chained = chain(first100, found_paths)
+    paths = list(sorted(chained, key=lambda pathinfo: len(pathinfo[0])) if sort_by_path_length else chained)
+
+    count = 0
+    for path in paths:
+        print_path(path, root, max_length=max_length, max_width=max_width)
+        count += 1
+
+    print(f'{count} results found, search started at {root.str(details=False)}')
+
+    return paths
+
+
+def _paths_new_nodes(node, founds):
+    if type(node) is list:
+        return ((idx, subnode) for idx, subnode in enumerate(node) if subnode not in founds)
+    elif type(node) is dict:
+        return ((key, subnode) for key in node if (subnode := node[key]) not in founds)
+    elif type(node) is not P4Node:
+        return ()
+    if node.node_type == 'all_nodes':
+        return ()
+    elif node.is_vec():
+        if type(node.vec) is dict:
+            return ((key, node.vec[key]) for key in sorted(node.vec.keys()))
+        else:
+            return ((idx, node[idx]) for idx, elem in enumerate(node.vec))
+
+    return ((attr, getattr(node, attr)) for attr in node.xdir(show_colours=False))
+
+def _paths_matchtype(nodetxt, valuetxt):
+    if nodetxt == valuetxt:
+        return '='
+    if nodetxt.startswith(valuetxt):
+        return '<'
+    if nodetxt.endswith(valuetxt):
+        return '>'
+    return '∊'
+
+def _paths_to_recurse(node, node_or_value, max_depth=20, path=[], found_nodes=set()):
+    """Finds the paths under node through which the value is accessible."""
+    if max_depth < 1:
+        return
+
+    if type(node_or_value) is P4Node and node == node_or_value:
+        p4_node_txt = node.name if 'name' in node else None
+        yield (path, '=', p4_node_txt, node)
+        return
+
+    nodetxt = f'{node}' if type(node) is not P4Node else node.name if 'name' in node else None
+
+    if nodetxt is not None and type(node_or_value) is not P4Node and (valuetxt := f'{node_or_value}') in nodetxt:
+        matchtype = _paths_matchtype(nodetxt, valuetxt)
+        yield (path, matchtype, nodetxt, node)
+        return
+
+    founds = found_nodes.copy()
+    founds.add(node)
+
+    for key, new_node in _paths_new_nodes(node, founds):
+        if type(new_node) is P4Node and new_node not in founds:
+            yield from _paths_to_recurse(new_node, node_or_value, max_depth - 1, path + [key], founds)
+
+
 class P4Node(object):
     """These objects represent nodes in the HLIR.
     Related nodes are accessed via attributes,
     with some shortcuts for vectors."""
 
-    common_attrs = {
-        "_data",
+    followable_paths = [
+        'action_ref.name',
+        'env_node.name',
+        'header_ref.name',
+
+        'constructedType.path.name',
+        'type_ref.path.name',
+        'type_ref.name',
+        'type.type_ref.path.name',
+        'type.type_ref.name',
+        'type.path.name',
+        'type.name',
+        'type.size',
+        'type.node_type',
+        'baseType.path.name',
+        'field_ref.name',
+
+        'method.member',
+        'method.path.name',
+
+        'expression.method.member',
+        'expression.method.path.name',
+
+        'expr.path.name',
+        'expr.ref.name',
+        'expr.ref.name',
+        'expr.expr.ref.name',
+        'expr.member.member',
+        'expr.member',
+
+        'path.name',
+        'path.absolute',
+        'ref.name',
+        'member.member',
+        'size.expression.value',
+        'control.name',
+        'default_action.expression.method.path.name',
+    ]
+
+    common_attrs = set((
         "Node_Type",
         "Node_ID",
         "node_parents",
@@ -75,6 +215,7 @@ class P4Node(object):
         "str",
         "id",
         "append",
+        "listable_types",
 
         # displayed by default
         "name",
@@ -84,39 +225,83 @@ class P4Node(object):
 
         # common tools
         "all_nodes_by_type",
-        "paths_to",
         "by_type",
+        "default_keys",
+        "filter",
+        "_filter",
+        "filterfalse",
+        "followable_paths",
+        "flatmap",
+        "_get_filter_fun",
         "json_repr",
-        "canonical_type",
-    }
+        "map",
+        "node_by_id",
+        "not_of",
+        "of",
+        "parent",
+        "_parent",
+        "parents",
+        "_parents",
+        "paths_to",
+        "sorted",
+        "urtype",
+        "_urtype",
+    ))
 
-    def __init__(self, dict={}, vec=None):
-        self.__dict__ = dict
-        if 'Node_ID' not in dict:
+    default_keys = ('Node_ID', 'vec', 'node_type')
+
+    def __init__(self, init=None, vec=None):
+        if isinstance(init, P4Node):
+            if not init.is_vec():
+                raise AssertionError(f"Non-vector P4Node {init} used in P4Node creation")
+            vec = list(init.vec)
+            dct = {}
+        elif isinstance(init, list):
+            vec = init
+            dct = {}
+        else:
+            dct = init or {}
+
+        self.__dict__ = dct
+        if 'Node_ID' not in dct:
             self.Node_ID = get_fresh_node_id()
-        self._data = {}
         self.vec = vec
+
+        if vec is not None and 'node_type' not in self:
+            self.node_type = '<vec>'
+
+        assert 'node_type' in self, f'P4Node created without node_type'
+        if self.vec is not None and len(self.__dict__) != len(P4Node.default_keys):
+            keys = ', '.join(key for key in self.__dict__.keys() if key not in P4Node.default_keys)
+            assert False, f'P4Node has attributes ({keys}) but is also a vector ({len(self.vec)} elements)'
 
     def __str__(self, show_name=True, show_type=True, show_funs=True, details=True, show_colours=True, depth=0):
         """A textual representation of a P4 HLIR node."""
-        if self.vec is not None and details:
+        if self.is_vec() and details:
+            def elem_print(node):
+                if type(node) is P4Node and node.is_vec() and len(node.vec) > 0 and type(node.vec[0]) is P4Node:
+                    counts = sorted(collections.Counter(node.map('node_type')).items())
+                    vecname = node.node_type[: node.node_type.find('<')]
+                    return ', '.join(f'{_c(vecname, clr_nodetype)}<{_c(ntype, clr_nodetype)}*{_c(count, clr_count)}>' for ntype, count in counts)
+                return f'{node}'
+
             if len(self.vec) > 0 and type(self.vec[0]) is P4Node:
-                fmt   = '{{0:>{}}} {{1}}'.format(len(str(len(self.vec))))
-                if type(self.vec) is dict:
-                    return '\n'.join([fmt.format(key, self.vec[key]) for key in sorted(self.vec.keys())])
-                else:
-                    return '\n'.join([fmt.format(idx, elem) for idx, elem in enumerate(self.vec)])
-            return str(self.vec)
+                veclen = len(f'{len(self.vec)}')
+                fmt    = f'{{0:>{veclen}}} {{1}}'
+                return '\n'.join((f'{idx:>{veclen}} {elem_print(elem)}' for idx, elem in enumerate(self.vec)))
+            return f'{self.vec}'
 
-        name = self.name if hasattr(self, 'name') else ""
+        name = self.name if 'name' in self.__dict__ else ""
 
-        part1 = name if show_name else ""
-        part2 = "#" + str(self.get_attr('Node_ID'))
-        part3 = "#{}".format(self.node_type) if show_type and hasattr(self, 'node_type') else ""
+        part1 = name or "" if show_name else ""
+        part2 = f"#{self.Node_ID}"
+        clr2 = _c(part2, clr_nodeid, show_colours)
+        part3 = f"#{self.node_type}" if show_type else ""
+        clr3 = _c(part3, clr_nodetype, show_colours)
         part4 = "[{}]".format(', '.join(self.xdir(details, depth=depth))) if show_funs else ""
 
         indent = " " * (8*depth)
-        return "{}{}{}{}{}".format(indent, part1, _c(part2, clr_nodeid, show_colours), _c(part3, clr_nodetype, show_colours), part4)
+        return f"{indent}{part1}{clr2}{clr3}{part4}"
 
     def __repr__(self):
         return self.__str__()
@@ -125,14 +310,12 @@ class P4Node(object):
         """If the node has the given key as an attribute, retrieves it.
         Otherwise, the node has to be a vector,
         which can be indexed numerically or, for convenience by node type."""
-        if key in self._data:
-            return self._data[key]
         if self.vec is None:
             return None
 
-        if type(key) == int:
+        if type(key) == int or type(key) == slice:
             return self.vec[key]
-        return P4Node({}, [node for node in self.vec if node.node_type == key])
+        return P4Node({'node_type': '<vec>'}, [node for node in self.vec if type(node) is P4Node if node.node_type == key])
 
     def __len__(self):
         if self.vec is None:
@@ -144,8 +327,25 @@ class P4Node(object):
             for x in self.vec:
                 yield x
 
-    def __mod__(self, other):
-        return self.paths_to(other)
+    def __truediv__(self, node_or_value):
+        if type(node := node_or_value) is P4Node:
+            paths_to(self, node, sort_by_path_length=False)
+        else:
+            paths_to(self, f'{node_or_value}', sort_by_path_length=False)
+
+    def __floordiv__(self, node_or_value):
+        if type(node := node_or_value) is P4Node:
+            paths_to(self, node, sort_by_path_length=True)
+        else:
+            paths_to(self, f'{node_or_value}', sort_by_path_length=True)
+
+    def by_type(self, typename, strict=False):
+        def is_right_type(t):
+            return t == typename or (not strict and t == f'Type_{typename}')
+        return P4Node([f for f in self.vec if is_right_type(f.node_type)])
+
+    def parent(self):
+        return self.node_parents[0][-1] if self.node_parents != [] else None
 
     def __lt__(self, depth):
         """This is not a proper comparison operator.
@@ -155,47 +355,175 @@ class P4Node(object):
         from ruamel import yaml
         import re
 
-        depth = max(1, depth)
+        depth = max(1, depth+1)
 
-        dumped = yaml.dump(yaml.safe_load(json.dumps(self.json_repr(depth))), default_flow_style=False).decode('string_escape')
+        dumped = yaml.dump(yaml.safe_load(json.dumps(self.json_repr(depth))), default_flow_style=False)
         ascii_escape = '\033'
-        print(re.sub(r'\\e[ ]*', ascii_escape, re.sub(r'\"\\e', '\\e', re.sub(r'\\e\[0m\"', '\\e[0m', dumped))))
+        dumped = re.sub(r'\\e\[0m\"', '\\\\e[0m', dumped)
+        dumped = re.sub(r'\"\\e',     '\\\\e', dumped)
+        dumped = re.sub(r'\\e[ ]*',    ascii_escape, dumped)
+        print(dumped)
 
         return None
 
-    def __nonzero__(self):
-        return 'node_type' in self.__dict__ and self.__dict__['node_type'] != "INVALID"
+    def __bool__(self):
+        if 'node_type' not in self.__dict__:
+            return False
+        if self.__dict__['node_type'] == "INVALID":
+            return False
+        if self.is_vec() and len(self.vec) == 0:
+            return False
+        return True
 
-    # TODO this would be better if it was set in set_common_attrs in hlir16_attrs
-    def canonical_type(self):
+    __nonzero__=__bool__
+
+    def _urtype(self):
+        """Follows the attributes type, type_ref and baseType as long as possible."""
         node = self
-        # Note: for enums, node.type == node, which would result in an infinite loop
-        while hasattr(node, "type") and node != node.type._type_ref:
-            node = node.type._type_ref
+
+        prevs = set()
+        while type(node) is P4Node and node not in prevs:
+            prevs.add(node)
+            if "type" in node:
+                node = node.type
+                continue
+            if "type_ref" in node:
+                node = node.type_ref
+                continue
+            if "baseType" in node:
+                node = node.baseType
+                continue
         return node
+
+    def _parents(self):
+        """Returns a path from the root HLIR node to self.
+        Usually it is the only such path."""
+
+        return P4Node(self.node_parents[0])
+
+    def _parent(self):
+        return self.node_parents[0][-1]
+
+    @staticmethod
+    def _get_filter_fun(fun_or_path, value):
+        if type(path := fun_or_path) is str:
+            getval_fun = lambda node: node(path)
+        else:
+            getval_fun = fun_or_path
+
+        if value is None:
+            return getval_fun
+        elif type(values := value) in (types.GeneratorType, tuple):
+            return lambda node: getval_fun(node) in values
+        else:
+            return lambda node: getval_fun(node) == value
+
+    def filter(self, fun_or_path, value=None):
+        """Returns a P4Node vector that contains the filtered elements of the node's vector, or an invalid P4Node if it is not a vector."""
+        return self._filter(P4Node._get_filter_fun(fun_or_path, value))
+
+    def filterfalse(self, fun_or_path, value=None):
+        """Returns a P4Node vector that contains the filtered elements of the node's vector, or an invalid P4Node if it is not a vector."""
+        filterfun = P4Node._get_filter_fun(fun_or_path, value)
+        return self._filter(lambda node: not filterfun(node))
+
+    def sorted(self, fun_or_path, value=None):
+        """Returns a P4Node vector that contains the filtered elements of the node's vector, or an invalid P4Node if it is not a vector."""
+        if type(path := fun_or_path) is str:
+            fun = lambda node: node(path)
+        else:
+            fun = fun_or_path
+
+        if not self.is_vec():
+            retval = P4Node({'name': 'INVALID', 'node_type': 'INVALID'})
+            retval.original_node = self
+            retval.original_path = '(filter)'
+            retval.last_good_node = self
+            retval.remaining_path = fun
+            return retval
+
+        return P4Node(list(sorted((node for node in self.vec), key=fun)))
+
+    def _filter(self, fun):
+        if self.is_vec():
+            return P4Node([node for node in self.vec if fun(node)])
+
+        retval = P4Node({'name': 'INVALID', 'node_type': 'INVALID'})
+        retval.original_node = self
+        retval.original_path = '(filter)'
+        retval.last_good_node = self
+        retval.remaining_path = fun
+        return retval
+
+    def of(self, nodes):
+        return self._filter(lambda n: n in nodes)
+
+    def not_of(self, nodes):
+        return self._filter(lambda n: n not in nodes)
+
+
+    def map(self, str_or_fun):
+        """Maps the function to the node's vector (if it has one) or the node itself (if it doesn't)."""
+        if type(path := str_or_fun) is str:
+            fun = lambda n: n(path)
+        else:
+            fun = str_or_fun
+
+        if self.is_vec():
+            return P4Node({'node_type': 'Vector'}, [fun(node) for node in self.vec])
+        return fun(self)
+
+    def flatmap(self, str_or_fun):
+        """Maps the function to the node's vector (if it has one) or the node itself (if it doesn't)."""
+        if type(str_or_fun) is str:
+            fun = lambda n: n(str_or_fun)
+        else:
+            fun = str_or_fun
+
+        if self.is_vec():
+            return P4Node(list((node2 for node in self.vec for node2 in fun(node))))
+        else:
+            invalid = P4Node({'name': 'INVALID', 'node_type': 'INVALID'})
+            invalid.original_node = original_node
+            invalid.original_path = key
+            invalid.last_good_node = current_node
+            invalid.remaining_path = ".".join(key.split(".")[idx:])
+            return invalid
+
+    def sorted(self, key, reverse=False):
+        """Sorts the vector of the node (if it has one)."""
+        if self.is_vec():
+            return P4Node(sorted(self.vec, key=key, reverse=reverse))
+        return None
 
     def json_repr(self, depth=3, max_vector_len=lambda depth: 2 if depth > 2 or depth <= 0 else [8, 4][depth - 1], is_top_level = True):
         if depth <= 0:
             return "..."
 
+        def fld_repr(fldname, prefix=""):
+            reprtxt = f'{self.__dict__[fldname]}' if fldname in self.__dict__ else ""
+            return f'{prefix}{reprtxt}'
+
         if self.is_vec():
             maxlen = max_vector_len(depth)
             selflen = len(self.vec)
-            repr = [e.json_repr(depth, is_top_level = True) if type(e) is P4Node else e for e in list(self.vec)[:maxlen]]
+            repr = [e.json_repr(depth, is_top_level = True) if type(e) is P4Node else e for e in self.vec[:maxlen]]
             if selflen > maxlen:
-                repr += ["({} more elements, {} in total)".format(selflen - maxlen, selflen)]
+                repr += [f"({selflen - maxlen} more elements, {selflen} in total)"]
         else:
             repr = {}
             for d in self.xdir(details=False, show_colours=False):
-                reprattrname = _c("." + d, clr_attrname)
-                reprtype = _c("#" + str(self.node_type) if 'node_type' in self.__dict__ else "#", clr_nodetype)
-                reprfld = "{}{}".format(reprattrname, reprtype)
-                if type(self.get_attr(d)) is P4Node:
-                    repr[reprfld] = self.get_attr(d).json_repr(depth-1, is_top_level = False)
-                else:
-                    repr[reprfld] = str(self.get_attr(d))
+                reprattrname = _c(f".{d}", clr_attrname)
+                reprtype = _c(fld_repr('node_type', "#"), clr_nodetype)
+                vecpart = _c(f'*{len(subnode)}', clr_count) if (subnode := self.get_attr(d)) and type(subnode) is P4Node and subnode.is_vec() else ''
+                reprfld = f"{reprattrname}{reprtype}{vecpart}"
 
-        nodename = "{}{}".format(_c(self.name  if 'name' in self.__dict__ else "", clr_value), _c("#" + str(self.node_type) if 'node_type' in self.__dict__ else "#", clr_nodetype))
+                if type(attr := self.get_attr(d)) is P4Node:
+                    repr[reprfld] = attr.json_repr(depth-1, is_top_level = False)
+                else:
+                    repr[reprfld] = f'{attr}'
+
+        nodename = f"{_c(fld_repr('name'), clr_value)}{_c(fld_repr('node_type', '#'), clr_nodetype)}"
 
         return { nodename: repr } if is_top_level else repr
 
@@ -222,19 +550,38 @@ class P4Node(object):
     def __add__(self, other):
         """Returns a P4Node that contains the elements from the node's vector and the other list/P4Node."""
         if type(other) is list:
-            return P4Node({}, self.vec + other)
-        return P4Node({}, self.vec + other.vec)
+            return P4Node({'node_type': '<vec>'}, self.vec + other)
+        return P4Node({'node_type': '<vec>'}, self.vec + other.vec)
+
+    def __contains__(self, key):
+        """Returns if the node has an attribute for the given key."""
+        return (type(key) == str and key in self.__dict__) or (self.vec and key in self.vec)
 
     def __getattr__(self, key):
+        if key == 'urtype':
+            return self._urtype()
+        if key == 'parent':
+            return self._parent()()
+        if key == 'parents':
+            return self._parents()
+
         if key.startswith('__') or key == 'vec':
             return object.__getattr__(self, key)
+
+        if key == 'node_type' and 'node_type' not in self.__dict__:
+            raise AttributeError(f"Key '{key}' not found in #{self.Node_ID}")
 
         if key.startswith('_'):
             realkey = key[1:]
             return self.__dict__[realkey] if realkey in self.__dict__ else self
 
-        if self.__dict__['node_type'] == "INVALID":
+        if 'node_type' in self.__dict__ and self.__dict__['node_type'] == "INVALID":
             return self
+
+        if key not in self.__dict__:
+            if 'Node_ID' in self.__dict__:
+                raise AttributeError(f"Key '{key}' not found in #{self.Node_ID}@{self.node_type}")
+            raise AttributeError(f"Key '{key}' not found in #{self.Node_ID}")
 
         return self.__dict__[key]
 
@@ -251,17 +598,15 @@ class P4Node(object):
 
         current_node = self
         for idx, k in enumerate(key.split(".")):
-            if k not in current_node.__dict__:
-                retval = P4Node()
-                retval.name = "INVALID"
-                retval.node_type = "INVALID"
-                retval.original_node = original_node
-                retval.original_path = key
-                retval.last_good_node = current_node
-                retval.remaining_path = ".".join(key.split(".")[idx:])
-                return retval
-
-            current_node = current_node.__dict__[k]
+            try:
+                current_node = getattr(current_node, k)
+            except AttributeError:
+                invalid = P4Node({'name': 'INVALID', 'node_type': 'INVALID'})
+                invalid.original_node = original_node
+                invalid.original_path = key
+                invalid.last_good_node = current_node
+                invalid.remaining_path = ".".join(key.split(".")[idx:])
+                return invalid
 
         if current_node:
             return continuation(current_node) if callable(continuation) else current_node
@@ -278,92 +623,97 @@ class P4Node(object):
     def xdir(self, details=False, show_colours=True, depth=0):
         """Lists the noncommon attributes of the node."""
         def follow_path(node, path):
-            for pathelem in path:
+            prev_node = node
+            for idx, pathelem in enumerate(path):
+                if not isinstance(node, P4Node):
+                    retval = P4Node({'name': 'INVALID', 'node_type': 'INVALID'})
+                    retval.original_node = node
+                    retval.original_path = path
+                    retval.last_good_node = prev_node
+                    retval.remaining_path = path[idx:]
+                    return retval
+
+                prev_node = node
                 node = node.get_attr(pathelem)
                 if node is None:
                     return None
 
-            return (".".join(path), str(node)) if type(node) is not P4Node else None
+            return (".".join(path), f'{node}') if type(node) is not P4Node else None
 
 
         def follow_paths(attrname, node):
-            paths = [
-                'header_ref.name',
-                'type_ref.path.name',
-                'type_ref.name',
-                'type.type_ref.path.name',
-                'type.type_ref.name',
-                'type.path.node_type',
-                'type.path.name',
-                'type.name',
-                'type.node_type',
-                'baseType.path.name',
-                'field_ref.name',
-                'expr.path.name',
-                'method.path.name',
-                'expr.ref.name',
-                'expr.expr.ref.name',
-                'expr.member.member',
-                'expr.member',
-                'path.name',
-                'ref.name',
-                'member.member',
-            ]
-            for path in [p.split('.')[1:] for p in paths if p.split('.')[0] == attrname]:
-                result = follow_path(node, path)
-                if result is not None:
+            for path in (split[1:] for p in P4Node.followable_paths if (split := p.split('.'))[0] == attrname):
+                if result := follow_path(node, path):
                     return result
             return None
 
-        def show_details(d):
-            if not details or type(d) not in [str, unicode]:
-                return (True, "")
+        def short_attrs():
+            return (d for d in dir(self) if not d.startswith("__") if d not in P4Node.common_attrs)
+
+        def get_details(d):
+            if not details or type(d) not in [str, bytes]:
+                return ("", "", clr_value)
 
             attr = self.get_attr(d)
 
             if type(attr) is types.FunctionType:
-                return (True, "=" + _c("fun", clr_function))
+                return ("=", "fun", clr_function)
+
+            if type(attr) is bool:
+                return ("=", "✘✓"[attr], clr_value)
+
+            if type(attr) is dict:
+                attrlen = len(attr)
+                return ("#", attrlen, clr_count if attrlen > 0 else clr_off)
 
             if type(attr) is not P4Node:
-                return (True, "=" + _c(str(attr) or '""', clr_value))
+                return ("=", f'{attr}' or '""', clr_value)
 
             result = follow_paths(d, attr)
             if result is not None:
-                return (True, _c("." + result[0], clr_extrapath) + "=" + _c(result[1], clr_value))
+                return (_c(f".{result[0]}", clr_extrapath) + "=", result[1], clr_value)
 
             if type(attr.get_attr(d)) is P4Node and attr.get_attr(d).vec is not None:
                 attrlen = len(attr.get_attr(d).vec)
-                return (attrlen > 0, "**" + _c(str(attrlen), clr_attrmul if attrlen > 0 else clr_off, show_colours))
+                return ("**", attrlen, clr_count if attrlen > 0 else clr_off)
 
-            listables = ['NameMap', 'ParameterList', 'Annotations', 'Vector']
-            is_listable = False if not hasattr(attr, 'node_type') else True in [attr.node_type.startswith(t) for t in listables]
-            if attr.vec is None and not is_listable:
-                return (True, "")
+            if attr.vec is None:
+                attr_count = sum(1 for ad in attr.__dict__ if ad not in P4Node.common_attrs)
+                return (".", attr_count, clr_count if attr_count != 0 else clr_off)
 
-            attrlen = len(attr.vec or [])
-            return (attrlen > 0, "*" + _c(str(attrlen), clr_attrmul if attrlen > 0 else clr_off, show_colours))
+            attrlen = len(attr.vec)
+            return ("*", attrlen, clr_count if attrlen > 0 else clr_off)
 
-        return [_c(d, clr_attrname if is_clr_on else clr_off, show_colours) + attr_details
-                    for d in dir(self)
-                    if not d.startswith("__")
-                    if d not in P4Node.common_attrs
-                    for (is_clr_on, attr_details) in [show_details(d)] ]
+        def condfun(data):
+            """Returns the index of the first condition that holds."""
+            _, det = data
+            parts = "# ** * .".split(' ')
+            conds = [det[0:2] == (part, 0) for part in parts] + [det[0] == part for part in parts] + [True]
+            return -list(dropwhile(lambda x: not x[1], enumerate(conds)))[0][0]
+
+        return [_c(d, clr_attrname if attr_details[2] != clr_off else clr_off, show_colours) + attr_details[0] + _c(attr_details[1], attr_details[2], show_colours)
+                    for d, attr_details in sorted(((d, get_details(d)) for d in short_attrs()),
+                                                  key = condfun)]
 
     def str(self, show_name=True, show_type=True, show_funs=True, details=True, show_colours=True, depth=0):
         return P4Node.__str__(self, show_name, show_type, show_funs, details, show_colours, depth)
 
-    def get(self, name, type_names=[], cond=lambda elem: True):
-        """A convenient way to get the element with the given name (and types, if given) in a vector.
+    def get(self, name_or_cond, type_names=[], cond2=lambda node: True):
+        """A convenient way to get the element with the given name/condition (and types, if given) in a vector.
         You can impose further limitations on the returned elements with the condition argument.
         """
+        if not self.is_vec():
+            return None
         if type(type_names) is str:
             type_names = [type_names]
-        potentials = [elem for elem in self.vec if elem.get_attr('name') == name and (type_names == [] or elem.node_type in type_names) if cond(elem)]
+        cond1 = (lambda node: node.get_attr('name') == name_or_cond) if type(name_or_cond) is str else name_or_cond
+        potentials = [node for node in self.vec if cond1(node) and (type_names == [] or node.node_type in type_names) if cond2(node)]
         return potentials[0] if len(potentials) == 1 else None
 
 
 def deep_copy(node, seen_ids = [], on_error = lambda x: None):
-    new_p4node = P4Node({})
+    new_p4node = P4Node({'node_type': 'DEEP_COPIED_NODE'})
+    new_p4node.is_copied = True
 
     if node.id in seen_ids:
         on_error(node.id)
