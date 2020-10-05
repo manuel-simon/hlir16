@@ -23,6 +23,16 @@ if pkgutil.find_loader('colored'):
     clr_extrapath = fg('magenta_2a')
     clr_off = fg('light_gray') + bg('dark_blue')
     clr_function = fg('magenta')
+else:
+    # note: these variables are accessed later on, they need to be defined
+    clr_attrname = None
+    clr_count = None
+    clr_nodeid = None
+    clr_nodetype = None
+    clr_value = None
+    clr_extrapath = None
+    clr_off = None
+    clr_function = None
 
 
 def _c(txt, colour, show_colours=True):
