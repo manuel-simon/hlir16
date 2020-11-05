@@ -280,15 +280,25 @@ def attrs_resolve_pathexprs(hlir):
             parargs = {par.type.name: arg.expression for par, arg in zip(params, args) if par.type.node_type == 'Type_Var' if par.type.name in partype_names}
             t.type_ref = parargs[t.name].type
 
+    for pe in hlir.groups.pathexprs.bits + hlir.groups.pathexprs.varbits:
+        clocs = pe.parents.filter('node_type', ('P4Parser', 'P4Control')).flatmap('controlLocals')
+        pe.decl_ref = clocs.get(pe.path.name)
+        if pe.decl_ref is None:
+            if len(pars := clocs.flatmap('parameters.parameters')) > 0:
+                parname, parsize = unique_everseen(((par.name, par.urtype.size) for par in pars))[0]
+                pe.decl_ref = pars.filter(lambda par: (par.name, par.urtype.size) == (parname, parsize))[0]
+
     for pe in hlir.groups.pathexprs.extern_under_member:
-        pe.decl_ref = pe.parents.filter('node_type', ('P4Parser', 'P4Control')).flatmap('controlLocals').get(pe.path.name)
+        clocs = pe.parents.filter('node_type', ('P4Parser', 'P4Control')).flatmap('controlLocals')
+        pe.decl_ref = clocs.get(pe.path.name)
         if pe.decl_ref is None:
             pe.decl_ref = pe.parents.filter('node_type', ('P4Parser', 'P4Control')).flatmap('type.applyParams.parameters').get(pe.path.name)
 
     for pe in hlir.groups.pathexprs.under_assign:
-        pe.decl_ref = pe.parents.filter('node_type', 'P4Control').flatmap('controlLocals').get(pe.path.name)
+        clocs = pe.parents.filter('node_type', ('P4Parser', 'P4Control')).flatmap('controlLocals')
+        pe.decl_ref = clocs.get(pe.path.name)
         if pe.decl_ref is None:
-            if len(pars := pe.parents.filter('node_type', ('P4Parser', 'P4Control')).flatmap('controlLocals').flatmap('parameters.parameters')) > 0:
+            if len(pars := clocs.flatmap('parameters.parameters')) > 0:
                 parname, parsize = unique_everseen(((par.name, par.urtype.size) for par in pars))[0]
                 pe.decl_ref = pars.filter(lambda par: (par.name, par.urtype.size) == (parname, parsize))[0]
 
@@ -497,19 +507,31 @@ def relink_aliases(hlir):
             arg.expression.type = found
 
 
+def create_struct_field(decl_inst):
+    struct_field = P4Node({'node_type': 'StructField'})
+    struct_field.name = decl_inst.name
+    struct_field.type = decl_inst.type
+    return struct_field
+
+
 def attrs_hdr_metadata_insts(hlir):
     """Metadata instances and header instances"""
 
     is_hdr = lambda fld: fld.urtype.node_type == 'Type_Header'
     is_named_hdr = lambda fld: fld.urtype.node_type == 'Type_Name' and resolve_type_name(hlir, fld.urtype).node_type == 'Type_Header'
-    insts = hlir.news.data.flatmap('fields').filter(lambda fld: is_hdr(fld) or is_named_hdr(fld)) + attrs_header_refs_in_parser_locals(hlir)
+
+    hdrs = hlir.news.data.flatmap('fields').filter(lambda fld: is_hdr(fld) or is_named_hdr(fld))
+    hrefs = attrs_header_refs_in_parser_locals(hlir).filter('node_type', 'Declaration_Variable').filter('type.node_type', 'Type_Name')
+    insts = hdrs + hrefs.map(create_struct_field)
 
     for inst in insts:
-        if not inst.urtype.path.absolute:
+        if 'path' not in inst.urtype:
+            breakpoint()
+        if 'path' in inst.urtype and not inst.urtype.path.absolute:
             inst.type.type_ref = hlir.headers.get(inst.urtype.path.name)
 
     set_header_meta_preparsed(hlir.allmetas, True)
-    for hdr in insts:
+    for hdr in hlir.headers:
         set_header_meta_preparsed(hdr, False)
 
     hlir.headers.append(hlir.allmetas.urtype)
@@ -532,7 +554,7 @@ def attrs_header_types_add_attrs(hlir):
     """Collecting header types, part 2"""
 
     # for hdrt in hlir.header_instances.map('urtype').filter(lambda hdrt: 'name' in hdrt):
-    for hdrt in hlir.header_instances.map('urtype'):
+    for hdrt in hlir.headers:
         offset = 0
         for fld in hdrt.fields:
             # TODO bit_offset, byte_offset, mask
@@ -734,6 +756,8 @@ def attrs_header_refs_in_exprs(hlir):
         mexpr.hdr_ref = member.hdr_ref
         mexpr.fld_ref = member.fld_ref
 
+        mexpr.urtype.type_ref = hlir.headers.get(mexpr.urtype.name)
+
 
 def unique_list(l):
     return list(set(l))
@@ -834,6 +858,44 @@ def attrs_typedef(hlir):
             typedef.size = typedef.urtype.size
 
 
+def attrs_reachable_parser_states(hlir):
+    parser = hlir.parsers[0]
+
+    reachable_states = set()
+    reachable_states.add('start')
+    reachable_states.add('accept')
+    reachable_states.add('reject')
+
+    for e in hlir.all_nodes.by_type('SelectExpression'):
+        for case in e.selectCases:
+            reachable_states.add(case.state.path.name)
+
+    for s in parser.states:
+        if 'selectExpression' not in s:
+            continue
+
+        b = s.selectExpression
+
+        if b.node_type == 'PathExpression':
+            reachable_states.add(b.path.name)
+        else:
+            for case in b.selectCases:
+                reachable_states.add(case.state.path.name)
+
+    for s in parser.states:
+        s.is_reachable = s.name in reachable_states
+
+
+def attrs_control_locals(hlir):
+    non_ctr_locals = ('counter', 'direct_counter', 'meter')
+
+    for ctl in hlir.controls:
+        ctl.local_var_decls = ctl.controlLocals.filter('node_type', ('Declaration_Variable', 'Declaration_Instance')).filterfalse('urtype.name', non_ctr_locals)
+        for local_var_decl in ctl.local_var_decls:
+            vart = local_var_decl.urtype
+            vart.needs_dereferencing = 'size' in vart and vart.size > 32
+
+
 def default_attr_funs(p4_filename, p4_version):
     return [
         hlir16.hlirx_regroup.regroup_attrs,
@@ -868,6 +930,10 @@ def default_attr_funs(p4_filename, p4_version):
         attrs_header_refs_in_exprs,
         attrs_stateful_memory,
         attrs_typedef,
+
+        attrs_reachable_parser_states,
+
+        attrs_control_locals,
 
         hlir16.hlirx_annots.copy_annots,
     ]
