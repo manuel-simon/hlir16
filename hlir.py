@@ -98,7 +98,7 @@ def p4_to_json(p4_filename, json_filename=None, p4_version=16, p4c_path=None, op
     for opt in opts:
         version_opts += ['-D', opt]
 
-    base_cmd = f'{p4test} {p4_filename} -I {p4include} --toJSON {json_filename}'.split(' ')
+    base_cmd = f'{p4test} {p4_filename} -I {p4include} --toJSON {json_filename} --Wdisable=unused'.split(' ')
     errcode = subprocess.call(base_cmd + version_opts)
 
     return json_filename if errcode == 0 else None
