@@ -674,10 +674,16 @@ def attrs_controls_tables(hlir):
     for table in hlir.tables:
         table.is_hidden = len(table.annotations.annotations.filter('name', 'hidden')) > 0
 
+        name_annot = table.annotations.annotations.get('name')
+        table.canonical_name = name_annot.expr[0].value if name_annot is not None else table.name
+
     for ctl in hlir.controls:
         for table in ctl.tables:
             for act in table.actions.actionList:
                 act.action_object = table.control.actions.get(act.expression.method.path.name)
+                ao = act.action_object
+                name_annot = ao.annotations.annotations.get('name')
+                ao.canonical_name = name_annot.expr[0].value if name_annot is not None else ao.name
 
             table.actions = P4Node(table.actions.actionList)
             add_attr_named_actions(table)
