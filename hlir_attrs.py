@@ -798,6 +798,9 @@ def smem_repr_type(smem):
 
 
 def smem_components(smem):
+    name_annot = smem.annotations.annotations.get('name')
+    smem.canonical_name = name_annot.expr[0].value if name_annot is not None else smem.name
+
     smem.size = smem.type.arguments[0].size if smem.smem_type == "register" else 32
     smem.is_signed = smem.type.arguments[0].isSigned if smem.smem_type == "register" else False
     if smem.smem_type not in ["direct_counter", "direct_meter"]:
