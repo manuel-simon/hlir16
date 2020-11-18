@@ -675,7 +675,7 @@ def attrs_controls_tables(hlir):
         table.is_hidden = len(table.annotations.annotations.filter('name', 'hidden')) > 0
 
         name_annot = table.annotations.annotations.get('name')
-        table.canonical_name = name_annot.expr[0].value if name_annot is not None else table.name
+        table.canonical_name = name_annot.expr[0].value if name_annot is not None else f'({table.name})'
 
     for ctl in hlir.controls:
         for table in ctl.tables:
@@ -683,7 +683,7 @@ def attrs_controls_tables(hlir):
                 act.action_object = table.control.actions.get(act.expression.method.path.name)
                 ao = act.action_object
                 name_annot = ao.annotations.annotations.get('name')
-                ao.canonical_name = name_annot.expr[0].value if name_annot is not None else ao.name
+                ao.canonical_name = name_annot.expr[0].value if name_annot is not None else f'({ao.name})'
 
             table.actions = P4Node(table.actions.actionList)
             add_attr_named_actions(table)
@@ -799,7 +799,7 @@ def smem_repr_type(smem):
 
 def smem_components(smem):
     name_annot = smem.annotations.annotations.get('name')
-    smem.canonical_name = name_annot.expr[0].value if name_annot is not None else smem.name
+    smem.canonical_name = name_annot.expr[0].value if name_annot is not None else f'({smem.name})'
 
     smem.size = smem.type.arguments[0].size if smem.smem_type == "register" else 32
     smem.is_signed = smem.type.arguments[0].isSigned if smem.smem_type == "register" else False
