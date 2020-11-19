@@ -657,6 +657,35 @@ def set_table_match_type(table):
     if counter['lpm']     == 0: table.matchType.name = 'exact'
 
 
+def make_canonical_name(node):
+    annot = node.annotations.annotations.get('name')
+    node.canonical_name = annot.expr[0].value if annot is not None else f'({node.name})'
+
+def make_short_canonical_names(nodes):
+    shorted = set()
+    multiple = set()
+
+    infos = [(node, node.canonical_name, node.canonical_name.split('.')[-1], 'is_hidden' in node and node.is_hidden) for node in nodes]
+
+    for node, canname, shortname, hid in infos:
+        if hid:
+            continue
+        shortname = canname.split('.')[-1]
+        if shortname in multiple:
+            continue
+        if shortname in shorted:
+            shorted.remove(shortname)
+            multiple.add(shortname)
+            continue
+        shorted.add(shortname)
+
+    for node, canname, shortname, hid in infos:
+        if hid:
+            node.short_name = canname
+        else:
+           node.short_name = shortname if shortname in shorted else canname
+
+
 def attrs_controls_tables(hlir):
     for ctl in hlir.controls:
         ctl.tables = P4Node(ctl.controlLocals['P4Table'])
@@ -674,19 +703,21 @@ def attrs_controls_tables(hlir):
     for table in hlir.tables:
         table.is_hidden = len(table.annotations.annotations.filter('name', 'hidden')) > 0
 
-        name_annot = table.annotations.annotations.get('name')
-        table.canonical_name = name_annot.expr[0].value if name_annot is not None else f'({table.name})'
+        make_canonical_name(table)
+
+    make_short_canonical_names(hlir.tables)
 
     for ctl in hlir.controls:
         for table in ctl.tables:
             for act in table.actions.actionList:
                 act.action_object = table.control.actions.get(act.expression.method.path.name)
                 ao = act.action_object
-                name_annot = ao.annotations.annotations.get('name')
-                ao.canonical_name = name_annot.expr[0].value if name_annot is not None else f'({ao.name})'
+                make_canonical_name(ao)
 
             table.actions = P4Node(table.actions.actionList)
             add_attr_named_actions(table)
+
+    make_short_canonical_names(hlir.controls.flatmap('tables').flatmap('actions').map('action_object'))
 
     # keyless tables are turned into empty-key tables
     for table in hlir.tables:
@@ -798,8 +829,7 @@ def smem_repr_type(smem):
 
 
 def smem_components(smem):
-    name_annot = smem.annotations.annotations.get('name')
-    smem.canonical_name = name_annot.expr[0].value if name_annot is not None else f'({smem.name})'
+    make_canonical_name(smem)
 
     smem.size = smem.type.arguments[0].size if smem.smem_type == "register" else 32
     smem.is_signed = smem.type.arguments[0].isSigned if smem.smem_type == "register" else False
@@ -855,6 +885,9 @@ def attrs_stateful_memory(hlir):
         smem.smem_type  = smem.type._baseType.path.name
         smem.components = smem_components(smem)
 
+    make_short_canonical_names([smem for _, smem in hlir.all_meters])
+    make_short_canonical_names([smem for _, smem in hlir.all_counters])
+    make_short_canonical_names(hlir.registers)
 
 def attrs_typedef(hlir):
     for typedef in hlir.all_nodes.by_type('Type_Typedef'):
