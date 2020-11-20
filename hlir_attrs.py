@@ -814,9 +814,9 @@ def get_smems(smem_type, tables):
 
 
 def get_registers(hlir):
-    reg_insts = hlir.decl_instances.filter('type.baseType.path.name', 'register')
+    reg_insts = hlir.decl_instances
     local_regs = hlir.controls.flatmap('controlLocals').filter('node_type', 'Declaration_Instance').filter('type.node_type', 'Type_Specialized')
-    return reg_insts + local_regs
+    return (reg_insts + local_regs).filter('type.baseType.path.name', 'register')
 
 
 # In v1model, all software memory cells are represented as 32 bit integers
