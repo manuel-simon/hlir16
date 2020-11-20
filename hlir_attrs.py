@@ -814,7 +814,9 @@ def get_smems(smem_type, tables):
 
 
 def get_registers(hlir):
-    return [r for r in hlir.decl_instances if r.type.baseType.path.name == 'register']
+    reg_insts = hlir.decl_instances.filter('type.baseType.path.name', 'register')
+    local_regs = hlir.controls.flatmap('controlLocals').filter('node_type', 'Declaration_Instance').filter('type.node_type', 'Type_Specialized')
+    return reg_insts + local_regs
 
 
 # In v1model, all software memory cells are represented as 32 bit integers
@@ -831,10 +833,11 @@ def smem_repr_type(smem):
 def smem_components(smem):
     make_canonical_name(smem)
 
-    smem.size = smem.type.arguments[0].size if smem.smem_type == "register" else 32
-    smem.is_signed = smem.type.arguments[0].isSigned if smem.smem_type == "register" else False
-    if smem.smem_type not in ["direct_counter", "direct_meter"]:
-        smem.amount = smem.arguments['Argument'][0].expression.value
+    smem.size = smem.type.arguments[0].urtype.size if smem.smem_type == "register" else 32
+    smem.is_signed = smem.type.arguments[0].urtype.isSigned if smem.smem_type == "register" else False
+    smem.is_direct = smem.smem_type in ("direct_counter", "direct_meter")
+
+    smem.amount = 1 if smem.is_direct else smem.arguments['Argument'][0].expression.value
 
     base_type = smem_repr_type(smem)
 
