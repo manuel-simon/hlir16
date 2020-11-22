@@ -37,7 +37,7 @@ else:
 
 def _c(txt, colour, show_colours=True):
     if not is_using_colours or not show_colours:
-        return txt
+        return f'{txt}'
     return f'{colour}{txt}{attr("reset")}'
 
 
