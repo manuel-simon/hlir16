@@ -525,8 +525,6 @@ def attrs_hdr_metadata_insts(hlir):
     insts = hdrs + hrefs.map(create_struct_field)
 
     for inst in insts:
-        if 'path' not in inst.urtype:
-            breakpoint()
         if 'path' in inst.urtype and not inst.urtype.path.absolute:
             inst.type.type_ref = hlir.headers.get(inst.urtype.path.name)
 
