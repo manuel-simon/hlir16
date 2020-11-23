@@ -419,15 +419,6 @@ def make_metaflds(fld_hdr_origins):
         yield metafld
 
 
-def attrs_header_refs_in_parser_locals(hlir):
-    """Temporary header references in parser locals"""
-
-    def is_tmp_header_inst(local):
-        return local.name.startswith('tmp_')
-
-    return P4Node([local for parser in hlir.parsers for local in parser.parserLocals if is_tmp_header_inst(local)])
-
-
 def set_header_meta_preparsed(hdr, is_meta_preparsed):
     hdr.urtype.is_metadata = is_meta_preparsed
     if 'path' not in hdr.urtype or not hdr.urtype.path.absolute:
@@ -517,12 +508,15 @@ def create_struct_field(decl_inst):
 def attrs_hdr_metadata_insts(hlir):
     """Metadata instances and header instances"""
 
+    # TODO move it to a more appropriate place
+    hlir.locals = hlir.controls.flatmap('controlLocals') + hlir.parsers.flatmap('parserLocals')
+
     is_hdr = lambda fld: fld.urtype.node_type == 'Type_Header'
     is_named_hdr = lambda fld: fld.urtype.node_type == 'Type_Name' and resolve_type_name(hlir, fld.urtype).node_type == 'Type_Header'
 
     hdrs = hlir.news.data.flatmap('fields').filter(lambda fld: is_hdr(fld) or is_named_hdr(fld))
-    hrefs = attrs_header_refs_in_parser_locals(hlir).filter('node_type', 'Declaration_Variable').filter('type.node_type', 'Type_Name')
-    insts = hdrs + hrefs.map(create_struct_field)
+    local_hdrs = hlir.locals.filter('node_type', 'Declaration_Variable').filter('type.node_type', 'Type_Name').filter(lambda h: hlir.headers.get(h.urtype.path.name) is not None).map(create_struct_field)
+    insts = hdrs + local_hdrs
 
     for inst in insts:
         if 'path' in inst.urtype and not inst.urtype.path.absolute:
