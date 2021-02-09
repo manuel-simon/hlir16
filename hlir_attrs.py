@@ -236,6 +236,11 @@ def attrs_resolve_types(hlir):
         for par, arg in zip(spcan.urtype.typeParameters.parameters, spcan.type.arguments):
             par.type_ref = arg
 
+    for ee in hlir.all_nodes.by_type('PathExpression').filter('type.node_type', 'Type_Method'):
+        for node in ee.type.typeParameters.parameters.filter('node_type', 'Type_Var'):
+            if (ref := resolve_type_var(hlir, node)):
+                node.urtype = ref
+
 
 def attrs_resolve_pathexprs(hlir):
     """Resolve all PathExpression nodes"""
@@ -296,9 +301,11 @@ def attrs_resolve_pathexprs(hlir):
 
     for pe in hlir.groups.pathexprs.under_assign:
         clocs = pe.parents.filter('node_type', ('P4Parser', 'P4Control')).flatmap('controlLocals')
-        pe.decl_ref = clocs.get(pe.path.name)
+        plocs = pe.parents.filter('node_type', ('P4Parser', 'P4Control')).flatmap('parserLocals')
+        locs = clocs + plocs
+        pe.decl_ref = locs.get(pe.path.name)
         if pe.decl_ref is None:
-            if len(pars := clocs.flatmap('parameters.parameters')) > 0:
+            if len(pars := locs.flatmap('parameters.parameters')) > 0:
                 parname, parsize = unique_everseen(((par.name, par.urtype.size) for par in pars))[0]
                 pe.decl_ref = pars.filter(lambda par: (par.name, par.urtype.size) == (parname, parsize))[0]
 
@@ -505,11 +512,12 @@ def create_struct_field(decl_inst):
     return struct_field
 
 
+def hlir_locals(hlir):
+    hlir.locals = hlir.controls.flatmap('controlLocals') + hlir.parsers.flatmap('parserLocals')
+
+
 def attrs_hdr_metadata_insts(hlir):
     """Metadata instances and header instances"""
-
-    # TODO move it to a more appropriate place
-    hlir.locals = hlir.controls.flatmap('controlLocals') + hlir.parsers.flatmap('parserLocals')
 
     is_hdr = lambda fld: fld.urtype.node_type == 'Type_Header'
     is_named_hdr = lambda fld: fld.urtype.node_type == 'Type_Name' and resolve_type_name(hlir, fld.urtype).node_type == 'Type_Header'
@@ -941,6 +949,8 @@ def default_attr_funs(p4_filename, p4_version):
         hlir16.hlirx_regroup.attrs_regroup_members,
         hlir16.hlirx_regroup.attrs_regroup_path_expressions,
         hlir16.hlirx_regroup.finish_regroup,
+
+        hlir_locals,
 
         make_allmetas_node,
         attrs_hdr_metadata_insts,
