@@ -505,11 +505,20 @@ def relink_aliases(hlir):
             arg.expression.type = found
 
 
-def create_struct_field(decl_inst):
-    struct_field = P4Node({'node_type': 'StructField'})
-    struct_field.name = decl_inst.name
-    struct_field.type = decl_inst.type
-    return struct_field
+def create_hdr(hlir, hdrname, hdrtype, idx=0, stack=None):
+    hdr = P4Node({'node_type': 'StructField'})
+    hdr.name = hdrname
+    hdr.type = hdrtype
+    hdr.is_local = True
+
+    hdr.stack_idx = idx
+    hdr.stack = stack
+
+    for ctl in hlir.controls:
+        if ctl.controlLocals.get(hdr.name, 'Declaration_Variable'):
+            hdr.ctl_ref = ctl
+
+    return hdr
 
 
 def hlir_locals(hlir):
@@ -522,9 +531,18 @@ def attrs_hdr_metadata_insts(hlir):
     is_hdr = lambda fld: fld.urtype.node_type == 'Type_Header'
     is_named_hdr = lambda fld: fld.urtype.node_type == 'Type_Name' and resolve_type_name(hlir, fld.urtype).node_type == 'Type_Header'
 
+    stack_infos = hlir.header_stacks.map(lambda stack: (stack, stack.name, stack.urtype.size.value, stack.urtype.elementType))
+
     hdrs = hlir.news.data.flatmap('fields').filter(lambda fld: is_hdr(fld) or is_named_hdr(fld))
-    local_hdrs = hlir.locals.filter('node_type', 'Declaration_Variable').filter('type.node_type', 'Type_Name').filter(lambda h: hlir.headers.get(h.urtype.path.name) is not None).map(create_struct_field)
-    insts = hdrs + local_hdrs
+    hdr_stacks = list(create_hdr(hlir, f'{name}_{idx}', type, idx=idx, stack=stack) for (stack, name, size, type) in stack_infos for idx in range(size))
+    local_hdrs = hlir.locals \
+        .filter('node_type', 'Declaration_Variable') \
+        .filter('type.node_type', 'Type_Name') \
+        .filter(lambda hdr: hlir.headers.get(hdr.urtype.path.name) is not None) \
+        .map(lambda hdr: create_hdr(hlir, hdr.name, hdr.type))
+    for hdr in hdrs:
+        hdr.is_local = False
+    insts = hdrs + hdr_stacks + local_hdrs
 
     for inst in insts:
         if 'path' in inst.urtype and not inst.urtype.path.absolute:
@@ -769,10 +787,6 @@ def attrs_header_refs_in_exprs(hlir):
 
     rest = no_externs.not_of(members.headers)
 
-    if len(stacks := member_nodes.filter('type.node_type', 'Type_Stack')) > 0:
-        names = ', '.join(unique_everseen((f'{stack.expr.path.name}.{stack.member}' for stack in stacks)))
-        raise NotImplementedError(f"Some headers ({names}) are header stacks which are currently not supported")
-
     for member in members.headers:
         mexpr = member.expr
         mtype = mexpr.urtype
@@ -786,6 +800,11 @@ def attrs_header_refs_in_exprs(hlir):
         mexpr = member.expr
         mtype = mexpr.urtype
         mname = member.member
+
+        stack_ops = ('push_front', 'pop_front')
+
+        if mexpr.type.node_type == 'Type_Stack' and mname in stack_ops:
+            continue
 
         member.hdr_ref = hlir.headers.get(mtype.name)
         member.fld_ref = member.hdr_ref.fields.get(mname)
@@ -941,6 +960,10 @@ def attrs_control_locals(hlir):
             vart.needs_dereferencing = 'size' in vart and vart.size > 32
 
 
+def attrs_hdr_stacks(hlir):
+    hlir.header_stacks = hlir.object_groups[13].flatmap('fields').filter('type.node_type', 'Type_Stack')
+
+
 def default_attr_funs(p4_filename, p4_version):
     return [
         hlir16.hlirx_regroup.regroup_attrs,
@@ -949,6 +972,8 @@ def default_attr_funs(p4_filename, p4_version):
         hlir16.hlirx_regroup.attrs_regroup_members,
         hlir16.hlirx_regroup.attrs_regroup_path_expressions,
         hlir16.hlirx_regroup.finish_regroup,
+
+        attrs_hdr_stacks,
 
         hlir_locals,
 
