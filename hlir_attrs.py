@@ -571,15 +571,18 @@ def attrs_add_enum_sizes(hlir):
 def attrs_header_types_add_attrs(hlir):
     """Collecting header types, part 2"""
 
-    # for hdrt in hlir.header_instances.map('urtype').filter(lambda hdrt: 'name' in hdrt):
     for hdrt in hlir.headers:
         offset = 0
         for fld in hdrt.fields:
             # TODO bit_offset, byte_offset, mask
             fld.offset = offset
-            fld.size = fld.urtype.size
             # 'Type_Bits' vs. 'Type_Varbits'
             fld.is_vw = (fld.urtype.node_type == 'Type_Varbits')
+
+            if fld.is_vw:
+                fld.max_vw_size = fld.urtype.size
+                hdrt.vw_fld = fld
+            fld.size = fld.urtype.size if not fld.is_vw else 0
 
             offset += fld.size
 
