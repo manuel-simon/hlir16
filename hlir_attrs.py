@@ -591,43 +591,55 @@ def attrs_header_types_add_attrs(hlir):
         hdrt.is_vw = any(hdrt.fields.map('is_vw'))
 
 
-table_key_match_order = ['exact', 'lpm', 'ternary']
+table_key_match_order = ['exact', 'range', 'selector', 'lpm', 'ternary']
 
 
 def set_table_key_attrs(hlir, table):
     for k in table.key.keyElements:
-        k.match_order = table_key_match_order.index(k.matchType.path.name)
+        match_name = k.matchType.path.name
+        k.match_order = table_key_match_order.index(match_name)
+        kx = k.expression
 
-        if 'expr' not in k.expression:
-            # the key element is a local variable in a control
-            k.size = table.control.controlLocals.get(k.expression.path.name).urtype.size
+        if 'expr' not in kx:
+            k.size = kx.urtype.size
+
+            # TODO remove?
+                # the key element is a local variable in a control
+                # locs = table.control.controlLocals
+                # locvar = locs.get(kx.path.name)
+                # k.size = locvar.urtype.size
+
             continue
 
-        expr = k.expression.expr
+        kxx = kx.expr
 
-        k.field_name = k.expression.member
+        k.field_name = kx.member
 
         if (fld := hlir.allmetas.urtype.fields.get(k.field_name)):
             # TODO .hdr_ref is already set in some cases, but not all
-            expr.hdr_ref = hlir.allmetas
+            kxx.hdr_ref = hlir.allmetas
 
             k.header = hlir.allmetas
             k.header_name = 'all_metadatas'
             k.size = fld.size
         else:
-            # supposing that k.expression is of form '<header_name>.<name>'
-            if expr.node_type == 'PathExpression':
-                k.header_name = expr.hdr_ref.name
-            # supposing that k.expression is of form 'hdr.<header_name>.<name>'
-            elif expr.node_type == 'Member':
-                k.header_name = expr.member
+            # supposing that kx is of form '<header_name>.<name>'
+            if kxx.node_type == 'PathExpression':
+                k.header_name = kxx.hdr_ref.name
+            # supposing that kx is of form 'hdr.<header_name>.<name>'
+            elif kxx.node_type == 'Member':
+                k.header_name = kxx.member
+            elif kxx.node_type == 'ArrayIndex':
+                idx = kxx.right.value
+                k.header_name = f'{kxx.left.member}_{idx}'
             else:
                 addWarning("Table key analysis", f"Header not found for key in table {table.name}")
+                continue
 
             k.header = hlir.header_instances.get(k.header_name)
 
-        if 'size' not in k:
-            k.size = k.header.urtype.fields.get(k.field_name).urtype.size
+            fld = k.header.urtype.fields.get(k.field_name)
+            k.size = fld.urtype.size
 
 
 def get_meta_instance(hlir, metaname):
