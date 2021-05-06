@@ -79,8 +79,19 @@ def attrs_annotations(hlir):
 
 
 def resolve_type_var(hlir, type_var):
-    typeargs = type_var.parents.filter('node_type', ('Method', 'Type_Extern', 'Type_Parser')).filter(lambda n: 'typeargs' in n and type_var.name in n.typeargs).map('typeargs')
-    return typeargs[0][type_var.name] if len(typeargs) > 0 else None
+    varname = type_var.name
+
+    if (parents := type_var.parents.filter('node_type', ('Type_Method'))) != []:
+        results = list(partype for parent in parents for parname, partype in zip(parent.typeParameters.parameters.map('name'), parent.parameters.parameters) if parname == varname)
+        if len(results) > 0:
+            return results[0]
+
+    if (parents := type_var.parents.filter('node_type', ('Type_Extern', 'Type_Parser'))) != []:
+        typeargs = parents.filter(lambda n: 'typeargs' in n and varname in n.typeargs).map('typeargs')
+        if len(typeargs) > 0:
+            return typeargs[0][varname]
+
+    return None
 
 
 
@@ -229,8 +240,9 @@ def attrs_resolve_types(hlir):
             stmt.enclosing_control = found[0]
 
     for node in hlir.all_nodes.by_type('Parameter').filter('type.node_type', 'Type_Var'):
-        if (ref := resolve_type_var(hlir, node)):
-            node.type.type_ref = ref
+        nt = node.type
+        if (ref := resolve_type_var(hlir, nt)):
+            nt.type_ref = ref
 
     for spcan in hlir.groups.pathexprs.specialized_canonical:
         for par, arg in zip(spcan.urtype.typeParameters.parameters, spcan.type.arguments):
@@ -239,7 +251,7 @@ def attrs_resolve_types(hlir):
     for ee in hlir.all_nodes.by_type('PathExpression').filter('type.node_type', 'Type_Method'):
         for node in ee.type.typeParameters.parameters.filter('node_type', 'Type_Var'):
             if (ref := resolve_type_var(hlir, node)):
-                node.urtype = ref
+                node.type_ref = ref
 
 
 def attrs_resolve_pathexprs(hlir):
@@ -690,9 +702,17 @@ def set_table_match_type(table):
     if counter['lpm']     == 0: table.matchType.name = 'exact'
 
 
+# note: Python 3.9 has this as a built-in
+def removeprefix(text, prefix):
+    if text.startswith(prefix):
+        return text[len(prefix):]
+    return text
+
+
 def make_canonical_name(node):
     annot = node.annotations.annotations.get('name')
-    node.canonical_name = annot.expr[0].value if annot is not None else f'({node.name})'
+    node.canonical_name = annot.expr[0].value if annot is not None else f'({removeprefix(node.name, "tbl_")})'
+
 
 def make_short_canonical_names(nodes):
     shorted = set()
@@ -716,7 +736,7 @@ def make_short_canonical_names(nodes):
         if hid:
             node.short_name = canname
         else:
-           node.short_name = shortname if shortname in shorted else canname
+            node.short_name = shortname if shortname in shorted else canname
 
 
 def attrs_controls_tables(hlir):
@@ -915,9 +935,13 @@ def attrs_stateful_memory(hlir):
     hlir.all_meters   = P4Node(unique_list(hlir.meters   + [(t, m) for t in hlir.tables for m in t.direct_meters]))
     hlir.all_counters = P4Node(unique_list(hlir.counters + [(t, c) for t in hlir.tables for c in t.direct_counters]))
 
-    for _table, smem in hlir.all_meters + hlir.all_counters:
+    for table, smem in hlir.all_meters + hlir.all_counters:
         smem.smem_type  = smem.type._baseType.path.name
+        smem.is_direct  = smem.smem_type in ('direct_counter', 'direct_meter')
         smem.components = smem_components(smem)
+        if smem.is_direct:
+            smem.table = table
+
     for smem in hlir.registers:
         smem.smem_type  = smem.type._baseType.path.name
         smem.components = smem_components(smem)
