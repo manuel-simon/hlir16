@@ -88,9 +88,9 @@ def first_n(g, max_count):
         count += 1
 
 
-def paths_to(root, node_or_value, sort_by_path_length=False, max_length=70):
+def paths_to(root, node_or_value, max_depth=20, sort_by_path_length=False, max_length=70):
     """Sorts using path text by default."""
-    found_paths = _paths_to_recurse(root, node_or_value)
+    found_paths = _paths_to_recurse(root, node_or_value, max_depth=max_depth)
 
     first100 = list(first_n(found_paths, 256))
     max_width = max(1, max((len(nodetxt or "") for _, _, nodetxt, _ in first100), default=30))
@@ -337,17 +337,17 @@ class P4Node(object):
             for x in self.vec:
                 yield x
 
-    def __truediv__(self, node_or_value):
+    def __truediv__(self, node_or_value, max_depth=20):
         if type(node := node_or_value) is P4Node:
-            paths_to(self, node, sort_by_path_length=False)
+            paths_to(self, node, max_depth=max_depth, sort_by_path_length=False)
         else:
-            paths_to(self, f'{node_or_value}', sort_by_path_length=False)
+            paths_to(self, f'{node_or_value}', max_depth=max_depth, sort_by_path_length=False)
 
-    def __floordiv__(self, node_or_value):
+    def __floordiv__(self, node_or_value, max_depth=20):
         if type(node := node_or_value) is P4Node:
-            paths_to(self, node, sort_by_path_length=True)
+            paths_to(self, node, max_depth=max_depth, sort_by_path_length=True)
         else:
-            paths_to(self, f'{node_or_value}', sort_by_path_length=True)
+            paths_to(self, f'{node_or_value}', max_depth=max_depth, sort_by_path_length=True)
 
     def by_type(self, typename, strict=False):
         def is_right_type(t):
