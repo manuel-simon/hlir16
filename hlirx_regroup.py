@@ -4,6 +4,7 @@
 from hlir16.p4node import P4Node
 from hlir16.hlir_utils import make_node_group
 from compiler_common import unique_everseen
+from compiler_log_warnings_errors import addError
 
 
 def remove_nodes(nodes, parent):
@@ -27,6 +28,7 @@ def regroup_attrs(hlir):
     groups = [
         ('control_types', 'Type_Control'),
         ('controls', 'P4Control'),
+        ('decl_consts', 'Declaration_Constant'),
         ('decl_instances', 'Declaration_Instance'),
         ('decl_matchkinds', 'Declaration_MatchKind'),
         ('enums', 'Type_Enum'),
