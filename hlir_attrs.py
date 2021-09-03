@@ -5,7 +5,7 @@
 # Copyright 2017 Eotvos Lorand University, Budapest, Hungary
 
 from hlir16.p4node import P4Node, get_fresh_node_id
-from hlir16.hlir_utils import make_node_group
+from hlir16.hlir_utils import make_node_group, align8_16_32, unique_list, shorten_locvar_names
 
 import hlir16.hlirx_annots
 import hlir16.hlirx_regroup
@@ -16,6 +16,13 @@ from compiler_common import unique_everseen, dlog
 import re
 from collections import Counter
 
+
+elementwise_binary_ops = {
+    #Bitwise operators
+    'BAnd':'&', 'BOr':'|', 'BXor':'^',
+    #Equality operators
+    'Equ':'==', 'Neq':'!='
+}
 
 simple_binary_ops = {
     #Binary arithmetic operators
@@ -138,6 +145,9 @@ def attrs_typeargs(hlir: P4Node):
     for parser in hlir.all_nodes.by_type('Type_Parser'):
         set_typeargs(parser)
 
+    for method in hlir.methods:
+        set_typeargs(method)
+
 
 def resolve_type_name(hlir, typename_node):
     if (found := hlir.news.data.get(typename_node.path.name)):
@@ -254,11 +264,22 @@ def attrs_resolve_types(hlir):
                 node.type_ref = ref
 
 
+def attrs_add_renamed_locals(hlir):
+    """Adds a .locals attribute that unifies the parserLocals/controlLocals attribute in P4Parser/P4Control nodes."""
+    # TODO delete the original parserLocals/controlLocals attribute
+    #      and do not use it anymore
+    for parser in hlir.parsers:
+        parser.locals = parser.parserLocals
+
+    for ctl in hlir.controls:
+        ctl.locals = ctl.controlLocals
+
+
 def attrs_resolve_pathexprs(hlir):
     """Resolve all PathExpression nodes"""
 
     for pe in hlir.groups.pathexprs.action:
-        pe.action_ref = hlir.map('controls').flatmap('controlLocals').get(pe.path.name)
+        pe.action_ref = hlir.map('controls').flatmap('locals').get(pe.path.name)
 
     for hexpr in hlir.groups.pathexprs.header + hlir.groups.pathexprs.struct + hlir.groups.member_exprs.headers + hlir.groups.member_exprs.structs:
         tname = hexpr.urtype.name
@@ -270,13 +291,14 @@ def attrs_resolve_pathexprs(hlir):
             hexpr.hdr_ref = found
         elif (found := hlir.news.meta.get(tname)):
             hexpr.hdr_ref = hlir.allmetas
-        elif (found := hexpr.parents.filter('node_type', 'P4Parser').flatmap('parserLocals').get(name)):
+        elif (found := hexpr.parents.filter('node_type', ('P4Parser', 'P4Control')).flatmap('locals').get(name)):
             hexpr.hdr_ref = found
-        elif (found := hexpr.parents.filter('node_type', 'P4Control').flatmap('controlLocals').get(name)):
-            hexpr.hdr_ref = found
+        elif len(founds := [hdrt for hdrt in unique_everseen(hlir.header_instances.map('urtype').filter('name', hexpr.type.name))]) == 1:
+            hexpr.hdr_ref = founds[0]
+            hexpr.type.type_ref = founds[0].urtype
 
     for pe in hlir.groups.pathexprs.table:
-        pe.table_ref = hlir.map('controls').flatmap('controlLocals').get(pe.path.name)
+        pe.table_ref = hlir.map('controls').flatmap('locals').get(pe.path.name)
 
     for mcexpr in hlir.groups.pathexprs.under_mcall:
         mname = mcexpr.path.name
@@ -284,7 +306,7 @@ def attrs_resolve_pathexprs(hlir):
         if (found := hlir.methods.get(mname)):
             mcexpr.action_ref = found
         else:
-            mcexpr.action_ref = hlir.controls.flatmap('controlLocals').get(mname)
+            mcexpr.action_ref = hlir.controls.flatmap('locals').get(mname)
 
         mct = mcexpr.urtype
         if mct.node_type == 'Type_Unknown':
@@ -298,23 +320,20 @@ def attrs_resolve_pathexprs(hlir):
             t.type_ref = parargs[t.name].type
 
     for pe in hlir.groups.pathexprs.bits + hlir.groups.pathexprs.varbits:
-        clocs = pe.parents.filter('node_type', ('P4Parser', 'P4Control')).flatmap('controlLocals')
+        clocs = pe.parents.filter('node_type', ('P4Parser', 'P4Control')).flatmap('locals')
         pe.decl_ref = clocs.get(pe.path.name)
-        if pe.decl_ref is None:
-            if len(pars := clocs.flatmap('parameters.parameters')) > 0:
-                parname, parsize = unique_everseen(((par.name, par.urtype.size) for par in pars))[0]
-                pe.decl_ref = pars.filter(lambda par: (par.name, par.urtype.size) == (parname, parsize))[0]
+        if pe.decl_ref is None and len(pars := clocs.flatmap('parameters.parameters')) > 0:
+            parname, parsize = unique_everseen(((par.name, par.urtype.size) for par in pars))[0]
+            pe.decl_ref = pars.filter(lambda par: (par.name, par.urtype.size) == (parname, parsize))[0]
 
     for pe in hlir.groups.pathexprs.extern_under_member:
-        clocs = pe.parents.filter('node_type', ('P4Parser', 'P4Control')).flatmap('controlLocals')
-        pe.decl_ref = clocs.get(pe.path.name)
+        locs = pe.parents.filter('node_type', ('P4Parser', 'P4Control')).flatmap('locals')
+        pe.decl_ref = locs.get(pe.path.name)
         if pe.decl_ref is None:
             pe.decl_ref = pe.parents.filter('node_type', ('P4Parser', 'P4Control')).flatmap('type.applyParams.parameters').get(pe.path.name)
 
     for pe in hlir.groups.pathexprs.under_assign:
-        clocs = pe.parents.filter('node_type', ('P4Parser', 'P4Control')).flatmap('controlLocals')
-        plocs = pe.parents.filter('node_type', ('P4Parser', 'P4Control')).flatmap('parserLocals')
-        locs = clocs + plocs
+        locs = pe.parents.filter('node_type', ('P4Parser', 'P4Control')).flatmap('locals')
         pe.decl_ref = locs.get(pe.path.name)
         if pe.decl_ref is None:
             if len(pars := locs.flatmap('parameters.parameters')) > 0:
@@ -322,7 +341,7 @@ def attrs_resolve_pathexprs(hlir):
                 pe.decl_ref = pars.filter(lambda par: (par.name, par.urtype.size) == (parname, parsize))[0]
 
     for pe in hlir.groups.pathexprs.under_unknown:
-        pe.table_ref = pe.parents.filter('node_type', 'P4Control').flatmap('controlLocals').get(pe.path.name)
+        pe.table_ref = pe.parents.filter('node_type', 'P4Control').flatmap('locals').get(pe.path.name)
 
 
 def attrs_member_naming(hlir):
@@ -476,6 +495,30 @@ def localvar_meta(hlir, name, hdr, hdrt, fld):
 
     return meta_hdr
 
+
+def attrs_pad_hdrs(hlir):
+    for hdr in hlir.headers:
+        for fld in hdr.fields:
+            size = fld.urtype.size
+            # important: as fld.urtype can coincide with urtypes of other fields,
+            #            .padded_size is added to fld.type, not .urtype
+            fld.type.padded_size = size if size > 32 else align8_16_32(size)
+
+
+def reorder_all_metadatas(hlir):
+    """Makes sure that byte aligned meta fields come first."""
+    def align_ordering(k):
+        psz = k.type.padded_size
+        if psz >= 32:
+            return -200
+        if psz >= 16:
+            return -100
+        return -psz
+
+    allmetas_type = hlir.allmetas.type.type_ref
+    allmetas_type.fields = P4Node(sorted(allmetas_type.fields, key=align_ordering))
+
+
 def make_allmetas_node(hlir):
     ctl_local_vars = hlir.controls.flatmap('controlLocals').filter('node_type', 'Declaration_Variable')
 
@@ -521,10 +564,11 @@ def create_hdr(hlir, hdrname, hdrtype, idx=0, stack=None):
     hdr = P4Node({'node_type': 'StructField'})
     hdr.name = hdrname
     hdr.type = hdrtype
-    hdr.is_local = True
+    hdr.is_local = False
 
-    hdr.stack_idx = idx
-    hdr.stack = stack
+    if stack is not None:
+        hdr.stack_idx = idx
+        hdr.stack = stack
 
     for ctl in hlir.controls:
         if ctl.controlLocals.get(hdr.name, 'Declaration_Variable'):
@@ -543,22 +587,35 @@ def attrs_hdr_metadata_insts(hlir):
     is_hdr = lambda fld: fld.urtype.node_type == 'Type_Header'
     is_named_hdr = lambda fld: fld.urtype.node_type == 'Type_Name' and resolve_type_name(hlir, fld.urtype).node_type == 'Type_Header'
 
-    stack_infos = hlir.header_stacks.map(lambda stack: (stack, stack.name, stack.urtype.size.value, stack.urtype.elementType))
+    for stk in hlir.header_stacks:
+        # note: the 'size' attribute in T4P4S refers to the bitsize of the header
+        #       this renaming avoids collision
+        stk.type.stk_size = stk.type.size
+        stk.type.del_attr('size')
+
+    stack_infos = hlir.header_stacks.map(lambda stack: (stack, stack.name, stack.urtype.stk_size.value, stack.urtype.elementType))
 
     hdrs = hlir.news.data.flatmap('fields').filter(lambda fld: is_hdr(fld) or is_named_hdr(fld))
-    hdr_stacks = list(create_hdr(hlir, f'{name}_{idx}', type, idx=idx, stack=stack) for (stack, name, size, type) in stack_infos for idx in range(size))
+    hdr_stacks = list(create_hdr(hlir, f'{name}_{idx}', type, idx=idx, stack=stack) for (stack, name, stk_size, type) in stack_infos for idx in range(stk_size))
     local_hdrs = hlir.locals \
         .filter('node_type', 'Declaration_Variable') \
         .filter('type.node_type', 'Type_Name') \
         .filter(lambda hdr: hlir.headers.get(hdr.urtype.path.name) is not None) \
         .map(lambda hdr: create_hdr(hlir, hdr.name, hdr.type))
-    for hdr in hdrs:
-        hdr.is_local = False
+    local_hdr_node_ids = set(local_hdrs.map('Node_ID'))
+
     insts = hdrs + hdr_stacks + local_hdrs
 
-    for inst in insts:
-        if 'path' in inst.urtype and not inst.urtype.path.absolute:
-            inst.type.type_ref = hlir.headers.get(inst.urtype.path.name)
+    for hdrinst in insts:
+        hdrinst.is_local = hdrinst.Node_ID in local_hdr_node_ids
+
+        if 'path' in hdrinst.urtype and not hdrinst.urtype.path.absolute:
+            hdrinst.type.type_ref = hlir.headers.get(hdrinst.urtype.path.name)
+
+        is_stack = 'stack' in hdrinst and hdrinst.stack is not None
+
+        # TODO find an even more reliable way to see if the header is skipped (extracted as _)
+        hdrinst.is_skipped = not is_stack and hdrinst.is_local and 'annotations' not in hdrinst and hdrinst.name.startswith('arg')
 
     set_header_meta_preparsed(hlir.allmetas, True)
     for hdr in hlir.headers:
@@ -580,27 +637,116 @@ def attrs_add_enum_sizes(hlir):
         fldt.size = dlog(len(fldt.members))
 
 
+def compute_fld_sizes(struct):
+    # perhaps turn this into a command line option
+    pad_meta_fields = True
+
+    is_meta = 'is_metadata' in struct and struct.is_metadata
+
+    offset = 0
+    for fld in struct.fields:
+        if (stk := fld.type).node_type == 'Type_Stack':
+            fld.size = stk.stk_size.value * stk.elementType.urtype.size
+        elif not ('is_vw' in fld and fld.is_vw):
+            fld.size = fld.urtype.size
+        else:
+            fld.size = 0
+
+        if pad_meta_fields and is_meta:
+            fld.offset = offset + (fld.type.padded_size - fld.size)
+            offset += fld.type.padded_size
+        else:
+            fld.offset = offset
+            offset += fld.size
+
+    struct.size = offset
+    struct.byte_width = (struct.size+7) // 8
+
+
 def attrs_header_types_add_attrs(hlir):
     """Collecting header types, part 2"""
 
-    for hdrt in hlir.headers:
-        offset = 0
-        for fld in hdrt.fields:
-            # TODO bit_offset, byte_offset, mask
-            fld.offset = offset
+    for hdr in hlir.headers:
+        for fld in hdr.fields:
             # 'Type_Bits' vs. 'Type_Varbits'
             fld.is_vw = (fld.urtype.node_type == 'Type_Varbits')
-
             if fld.is_vw:
                 fld.max_vw_size = fld.urtype.size
-                hdrt.vw_fld = fld
-            fld.size = fld.urtype.size if not fld.is_vw else 0
+                hdr.vw_fld = fld
 
-            offset += fld.size
+        hdr.is_vw = any(hdr.fields.map('is_vw'))
 
-        hdrt.size = sum(hdrt.fields.map('size'))
-        hdrt.byte_width = (hdrt.size+7) // 8
-        hdrt.is_vw = any(hdrt.fields.map('is_vw'))
+
+    for hdr in hlir.headers:
+        compute_fld_sizes(hdr)
+
+    structs_idx = 13
+    for struct in hlir.object_groups[structs_idx]:
+        compute_fld_sizes(struct)
+
+
+def attrs_add_field_cnames(hlir):
+    """Adds a short_len attribute that extracts fldname from generated field names like _fldname101."""
+    for hdrt in hlir.headers.filter(lambda hdrt: len(hdrt.fields) > 0):
+        shorten_locvar_names(hdrt.fields, last_infix='')
+
+
+def replace_short_name(comp, new_name):
+    if 'short_name' not in comp or comp.short_name.startswith('('):
+        comp.short_name = f'[{new_name}]'
+
+
+def improve_action_names(ctl, comp, actions, prefix):
+    by_nodetype = {
+        'IfStatement': '.if',
+    }
+
+    if (ctl2 := comp).node_type == 'P4Control':
+        improve_action_names(ctl2, ctl2.body, ctl2.actions, f'{prefix}{"." if prefix != "" else ""}{ctl2.type.name}')
+    elif (blk := comp).node_type in ('BlockStatement', 'SwitchCase'):
+        parts = blk.components if blk.node_type == 'BlockStatement' else blk.statement
+        for idx2, comp2 in enumerate(parts):
+            idx_txt = '' if len(parts) == 1 else f'#{idx2+1}'
+            improve_action_names(ctl, comp2, actions, f'{prefix}{by_nodetype.get(comp2.node_type, "")}{idx_txt}')
+    elif (sw := comp).node_type == 'SwitchStatement':
+        for idx2, comp2 in enumerate(sw.cases):
+            idx_txt = '' if len(sw.cases) == 1 else f'#{idx2+1}'
+            improve_action_names(ctl, comp2, actions, f'{prefix}.case{idx_txt}')
+    elif comp.node_type == 'IfStatement':
+        improve_action_names(ctl, comp.ifTrue, actions, f'{prefix}T')
+        if 'ifFalse' in comp:
+            improve_action_names(ctl, comp.ifFalse, actions, f'{prefix}F')
+    elif (mcall := comp).node_type == 'MethodCallStatement':
+        if 'action_ref' in mcall.methodCall.method:
+            action = mcall.methodCall.method.action_ref
+        else:
+            method = mcall.methodCall.method
+            mname = method.expr.path.name
+            mprefix = 'tbl_'
+            if mname.startswith(mprefix) and (action := actions.get(mname[len(mprefix):])) is not None:
+                if (tbl := ctl.tables.get(f'{mprefix}{action.name}')) is not None:
+                    replace_short_name(tbl, prefix)
+            else:
+                return
+
+        replace_short_name(action, prefix)
+    elif (mcall := comp).node_type == 'EmptyStatement':
+        pass
+    else:
+        addWarning('Improving action names', f'Unexpected statement node type {comp.node_type}')
+
+
+def attrs_improve_action_names(hlir):
+    for ctl in hlir.controls:
+        improve_action_names(ctl, ctl, ctl.actions, '')
+
+
+def attrs_improve_localvar_names(hlir):
+    for ctl in hlir.controls:
+        shorten_locvar_names(ctl.controlLocals['Declaration_Variable'])
+
+    for parser in hlir.parsers:
+        shorten_locvar_names(parser.parserLocals['Declaration_Variable'])
 
 
 table_key_match_order = ['exact', 'range', 'selector', 'lpm', 'ternary']
@@ -627,7 +773,11 @@ def set_table_key_attrs(hlir, table):
 
         k.field_name = kx.member
 
-        if (fld := hlir.allmetas.urtype.fields.get(k.field_name)):
+        hdrname = None
+        if kxx.node_type == 'Member':
+            hdrname = kxx.member
+
+        if hdrname is None and (fld := hlir.allmetas.urtype.fields.get(k.field_name)):
             # TODO .hdr_ref is already set in some cases, but not all
             kxx.hdr_ref = hlir.allmetas
 
@@ -783,8 +933,8 @@ def attrs_controls_tables(hlir):
         set_table_key_attrs(hlir, table)
 
     for table in hlir.tables:
-        table.key_length_bits = table_key_length(hlir, table)
-        table.key_length_bytes = (table.key_length_bits+7) // 8
+        table.key_bit_size = table_key_length(hlir, table)
+        table.key_length_bytes = (table.key_bit_size+7) // 8
 
 
 def attrs_extract_node(hlir, node, method):
@@ -822,13 +972,25 @@ def attrs_header_refs_in_exprs(hlir):
 
     rest = no_externs.not_of(members.headers)
 
+    meta_flds = hlir.allmetas.urtype.fields
+    for member in members.paths.filterfalse('urtype.node_type', 'Type_Stack').filter('expr.urtype.node_type', 'Type_Struct'):
+        hdrt_name = member.expr.urtype.name
+        if not hlir.news.meta.get(hdrt_name):
+            # TODO remove
+            breakpoint()
+
+        fldname = member.member
+
+        member.hdr_ref = hlir.allmetas
+        member.fld_ref = meta_flds.get(fldname, 'StructField')
+
     for member in members.headers:
         mexpr = member.expr
         mtype = mexpr.urtype
-        mname = member.member
-        tname = member.type.name
+        hdrname = member.member
+        hdrt_name = member.type.name
 
-        member.hdr_ref = hlir.header_instances.filter('urtype.name', tname).get(mname)
+        member.hdr_ref = hlir.header_instances.filter('urtype.name', hdrt_name).get(hdrname)
         mexpr.hdr_ref = member.hdr_ref
 
     for member in members.members:
@@ -838,20 +1000,24 @@ def attrs_header_refs_in_exprs(hlir):
 
         stack_ops = ('push_front', 'pop_front')
 
-        if mexpr.type.node_type == 'Type_Stack' and mname in stack_ops:
+        if mtype.node_type == 'Type_Stack' and mname in stack_ops:
             continue
 
-        member.hdr_ref = hlir.headers.get(mtype.name)
-        member.fld_ref = member.hdr_ref.fields.get(mname)
+        if 'expr' in mexpr and mexpr.expr.type.node_type == 'Type_Stack' and mexpr.member == 'last':
+            member.stk_name = mexpr.expr.member
+            continue
 
-        mexpr.hdr_ref = member.hdr_ref
-        mexpr.fld_ref = member.fld_ref
+        hdrname = mexpr.member
+        hdrinst = hlir.header_instances.get(hdrname)
+        member.hdr_ref = hdrinst
+        mexpr.hdr_ref  = hdrinst
+
+        fldname = mname
+        if (fref := member.hdr_ref.urtype.fields.get(fldname)):
+            member.fld_ref = fref
+            mexpr.fld_ref  = fref
 
         mexpr.urtype.type_ref = hlir.headers.get(mexpr.urtype.name)
-
-
-def unique_list(l):
-    return list(set(l))
 
 
 def get_ctrlloc_smem_type(loc):
@@ -924,8 +1090,8 @@ def smem_components(smem):
 def attrs_stateful_memory(hlir):
     # direct counters
     for table in hlir.tables:
-        table.direct_meters    = P4Node(unique_list([m for t, m in get_smems('direct_meter', [table])]))
-        table.direct_counters  = P4Node(unique_list([c for t, c in get_smems('direct_counter', [table])]))
+        table.direct_meters    = P4Node(unique_list(m for t, m in get_smems('direct_meter', [table])))
+        table.direct_counters  = P4Node(unique_list(c for t, c in get_smems('direct_counter', [table])))
 
     # indirect counters
     hlir.meters    = P4Node(unique_list(get_smems('meter', hlir.tables)))
@@ -1000,7 +1166,8 @@ def attrs_control_locals(hlir):
 
 
 def attrs_hdr_stacks(hlir):
-    hlir.header_stacks = hlir.object_groups[13].flatmap('fields').filter('type.node_type', 'Type_Stack')
+    hdrstks_idx = 13
+    hlir.header_stacks = hlir.object_groups[hdrstks_idx].flatmap('fields').filter('type.node_type', 'Type_Stack')
 
 
 def default_attr_funs(p4_filename, p4_version):
@@ -1032,9 +1199,16 @@ def default_attr_funs(p4_filename, p4_version):
 
         attrs_add_enum_sizes,
 
+        attrs_add_renamed_locals,
+
         attrs_resolve_pathexprs,
 
+        attrs_pad_hdrs,
+        reorder_all_metadatas,
+
         attrs_header_types_add_attrs,
+
+        attrs_add_field_cnames,
 
         attrs_controls_tables,
         attrs_extract_nodes,
@@ -1045,6 +1219,9 @@ def default_attr_funs(p4_filename, p4_version):
         attrs_reachable_parser_states,
 
         attrs_control_locals,
+
+        attrs_improve_action_names,
+        attrs_improve_localvar_names,
 
         hlir16.hlirx_annots.copy_annots,
     ]
