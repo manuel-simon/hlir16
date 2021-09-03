@@ -14,20 +14,43 @@ def copy_arg(arg):
     node.annotations = []
     return node
 
+
 def apply_annots(postfix, annots, expr):
-    extra_args = annots.map('expr')
+    """Copies the method call"""
+    copy_error = lambda node_id: addError('transforming hlir', f'Recursion found during deep-copy on node {node_id}')
 
     mcall = expr.methodCall
     method = mcall.method
 
-    method.decl_ref = deep_copy(method.action_ref, on_error=lambda node_id: addError('transforming hlir', f'Recursion found during deep-copy on node {node_id}'))
-    method.decl_ref.name += f"_{postfix}"
-    method.decl_ref.type.parameters.parameters.vec += extra_args.map(copy_arg)
-    del method.decl_ref.type.parameters.parameters.vec[:2]
+    method.action_ref = deep_copy(method.action_ref, on_error=copy_error)
+    method.type       = deep_copy(method.type, on_error=copy_error)
 
-    method.path.name += f"_{postfix}"
-    mcall.arguments.vec += extra_args
-    del expr.methodCall.arguments.vec[:2]
+    method.action_ref.name += f"_{postfix}"
+    method.path.name       += f"_{postfix}"
+    method.type.name       += f"_{postfix}"
+
+
+    mapars = method.action_ref.type.parameters.parameters
+    mtpars = method.type.parameters.parameters
+    mcargs = mcall.arguments
+
+    extra_args = annots.flatmap('expr')
+    mapars.vec += extra_args.map(copy_arg)
+    # TODO is using deep_copy OK in all cases, or is a separate method like copy_arg needed?
+    mtpars.vec += extra_args.map('type').map(deep_copy)
+    mcargs.vec += extra_args
+
+    # remove "checksum"
+    del mapars.vec[2]
+    del mtpars.vec[2]
+    del mcargs.vec[2]
+
+    # remove "condition"
+    del mapars.vec[0]
+    del mtpars.vec[0]
+    del mcargs.vec[0]
+
+    # kept params: data, algo
 
 
 def search_for_annotations(stmt):
