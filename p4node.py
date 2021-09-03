@@ -208,7 +208,6 @@ class P4Node(object):
         "Node_ID",
         "node_parents",
         "vec",
-        "add_attr",
         "is_vec",
         "set_vec",
         "json_data",
@@ -217,6 +216,7 @@ class P4Node(object):
         "remove_attr",
         "get_attr",
         "set_attr",
+        "del_attr",
         "define_common_attrs",
         "set_vec",
         "is_vec",
@@ -544,6 +544,10 @@ class P4Node(object):
         """Sets an attribute of the object."""
         self.__dict__[key] = value
 
+    def del_attr(self, key):
+        """Deletes an attribute of the object."""
+        del self.__dict__[key]
+
     @staticmethod
     def define_common_attrs(attr_names):
         """The attribute names in the list will not be listed
@@ -717,8 +721,13 @@ class P4Node(object):
         if type(type_names) is str:
             type_names = [type_names]
         cond1 = (lambda node: node.get_attr('name') == name_or_cond) if type(name_or_cond) is str else name_or_cond
-        potentials = [node for node in self.vec if cond1(node) and (type_names == [] or node.node_type in type_names) if cond2(node)]
-        return potentials[0] if len(potentials) == 1 else None
+        potentials = (node for node in self.vec if cond1(node) and (type_names == [] or node.node_type in type_names) if cond2(node))
+
+        elem1 = next(potentials, None)
+        if elem1 is None: return None
+        elem2 = next(potentials, None)
+        if elem2 is not None: return None
+        return elem1
 
 
 def deep_copy(node, seen_ids = [], on_error = lambda x: None):
