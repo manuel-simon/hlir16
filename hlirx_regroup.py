@@ -97,6 +97,7 @@ def attrs_regroup_members(hlir):
     hlir.groups.member_exprs.members = remove_nodes(mem_methods.filter(lambda m: 'member' in m.expr), mes)
     hlir.groups.member_exprs.exprs = remove_nodes(mes.filter(lambda m: 'expr' in m.expr), mes)
     hlir.groups.member_exprs.under_mcall = remove_nodes(mes.filter(lambda m: m.parent().node_type == 'MethodCallExpression'), mes)
+    hlir.groups.member_exprs.keyelement = remove_nodes(mes.filter(lambda m: m.parent().node_type == 'KeyElement'), mes)
 
     check_no_leftovers(hlir.groups.member_exprs, mes, "member expression")
 
