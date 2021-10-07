@@ -17,30 +17,6 @@ import re
 from collections import Counter
 
 
-elementwise_binary_ops = {
-    #Bitwise operators
-    'BAnd':'&', 'BOr':'|', 'BXor':'^',
-    #Equality operators
-    'Equ':'==', 'Neq':'!='
-}
-
-simple_binary_ops = {
-    #Binary arithmetic operators
-    'Div':'/', 'Mod':'%',
-    #Binary comparison operators
-    'Grt':'>', 'Geq':'>=', 'Lss':'<', 'Leq':'<=',
-    #Bitwise operators
-    'BAnd':'&', 'BOr':'|', 'BXor':'^',
-    #Boolean operators
-    'LAnd':'&&', 'LOr':'||',
-    #Equality operators
-    'Equ':'==', 'Neq':'!='
-}
-
-# TODO currently, AddSat and SubSat are handled exactly as Add and Sub
-complex_binary_ops = {'AddSat':'+', 'SubSat':'-', 'Add':'+', 'Sub':'-', 'Mul':'*', 'Shl':'<<', 'Shr':'>>'}
-
-
 def attrs_resolve_members(hlir):
     for m in hlir.groups.member_exprs.bits.filter('expr.path.name', hlir.news.user_meta_var):
         m.expr.hdr_ref = hlir.allmetas
