@@ -18,8 +18,8 @@ def align8_16_32(size):
     return 8 if size <= 8 else 16 if size <= 16 else 32
 
 
-def unique_list(l):
-    return list(set(l))
+def unique_list(elems):
+    return list(set(elems))
 
 
 def shorten_locvar_names(locvars, last_infix='_'):
