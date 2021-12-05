@@ -25,6 +25,7 @@ def walk_json(node, fun, nodes, skip_elems=['Node_Type', 'Node_ID', 'Source_Info
         node_id = node['Node_ID']
         if node_id not in nodes:
             nodes[node_id] = P4Node({
+                'Node_ID': node_id,
                 'node_type': '(incomplete_json_data)',
                 'node_parents': [node_parent_chain],
             })
@@ -39,7 +40,6 @@ def walk_json(node, fun, nodes, skip_elems=['Node_Type', 'Node_ID', 'Source_Info
 
 
 def p4node_creator(node, elems, nodes, skip_elems, node_parent_chain):
-    # if type(node) is not dict and type(node) is not list:
     if not isinstance(node, (dict, list)):
         # note: types: string, bool, int
         return node
