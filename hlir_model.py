@@ -14,6 +14,8 @@ model_specific_infos = {
             "standard_metadata_t",
         ],
         "extern_reprs": {},
+        # v1model.p4 appropriately marks deparsers with @deparser
+        "deparsers": [],
     },
     "PSA_Switch": {
         "user_meta_var": "user_meta",
@@ -30,6 +32,8 @@ model_specific_infos = {
             'InternetChecksum': P4Node({'node_type': 'Type_Bits', 'isSigned': False, 'size': 16, 'padded_size': 16}),
             'Digest':           P4Node({'node_type': 'Type_Bits', 'isSigned': False, 'size': 32, 'padded_size': 32}),
         },
+        # psa.p4 does not mark deparsers with @deparser, hence this hack
+        "deparsers": ["IngressDeparser", "EgressDeparser"],
     },
 }
 

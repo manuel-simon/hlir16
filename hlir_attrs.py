@@ -244,21 +244,6 @@ def attrs_resolve_types(hlir):
         for par, arg in zip(spcan.type_parameters, spcan.type.arguments):
             par.type_ref = arg
 
-        # print()
-        # print('old', spcan.decl_ref.urtype.typeParameters.parameters)
-        # old_typepars2 = spcan.decl_ref.urtype.typeParameters.parameters
-        # spcan.decl_ref.urtype.typeParameters = P4Node({'node_type': 'TypeParameters', 'parameters': copy_type_var_nodes(old_typepars2)})
-        # for typepar, typearg in zip(spcan.decl_ref.urtype.typeParameters.parameters, spcan.type.arguments):
-        #     typepar.type_ref = typearg
-
-        # print('new', spcan.decl_ref.urtype.typeParameters.parameters)
-
-        # if  'digest' in spcan.path.name:
-        #     print(spcan)
-        #     print(spcan.decl_ref.urtype.typeParameters)
-        #     print(spcan.decl_ref.urtype.typeParameters.parameters)
-
-
     for ee in hlir.all_nodes.by_type('PathExpression').filter('type.node_type', 'Type_Method'):
         for node in ee.type.typeParameters.parameters.filter('node_type', 'Type_Var'):
             if (ref := resolve_type_var(hlir, node)):
@@ -267,8 +252,6 @@ def attrs_resolve_types(hlir):
 
 def attrs_add_renamed_locals(hlir):
     """Adds a .locals attribute that unifies the parserLocals/controlLocals attribute in P4Parser/P4Control nodes."""
-    # TODO delete the original parserLocals/controlLocals attribute
-    #      and do not use it anymore
     for parser in hlir.parsers:
         parser.locals = parser.parserLocals
 
@@ -345,6 +328,18 @@ def attrs_resolve_pathexprs(hlir):
         pe.table_ref = pe.parents.filter('node_type', 'P4Control').flatmap('locals').get(pe.path.name)
 
 
+def attrs_fix_enum_error_pars(hlir):
+    """Fix some Parameter nodes that don't properly link to enums/errors"""
+
+    for par in hlir.all_nodes['Parameter'].filter('type.node_type', 'Type_Error'):
+        if (err := hlir.errors.get(par.type.name)):
+            par.type = err
+
+    for par in hlir.all_nodes['Parameter'].filter('type.node_type', 'Type_Enum'):
+        if (enum := hlir.enums.get(par.type.name)):
+            par.type = enum
+
+
 def attrs_member_naming(hlir):
     """Add naming information to nodes"""
 
@@ -380,6 +375,7 @@ def attrs_top_level(hlir, p4_filename, p4_version):
 
     hlir.news.user_meta_var = infos['user_meta_var']
     hlir.news.meta_types = P4Node(infos['meta_types'])
+    hlir.news.deparsers = P4Node(infos['deparsers'])
 
 
 def metadata_type_name_to_inst_name(mt_name):
@@ -1188,8 +1184,6 @@ def attrs_typedef(hlir):
 
 
 def attrs_reachable_parser_states(hlir):
-    parser = hlir.parsers[0]
-
     reachable_states = set()
     reachable_states.add('start')
     reachable_states.add('accept')
@@ -1199,20 +1193,21 @@ def attrs_reachable_parser_states(hlir):
         for case in e.selectCases:
             reachable_states.add(case.state.path.name)
 
-    for s in parser.states:
-        if 'selectExpression' not in s:
-            continue
+    for parser in hlir.parsers:
+        for s in parser.states:
+            if 'selectExpression' not in s:
+                continue
 
-        b = s.selectExpression
+            b = s.selectExpression
 
-        if b.node_type == 'PathExpression':
-            reachable_states.add(b.path.name)
-        else:
-            for case in b.selectCases:
-                reachable_states.add(case.state.path.name)
+            if b.node_type == 'PathExpression':
+                reachable_states.add(b.path.name)
+            else:
+                for case in b.selectCases:
+                    reachable_states.add(case.state.path.name)
 
-    for s in parser.states:
-        s.is_reachable = s.name in reachable_states
+        for s in parser.states:
+            s.is_reachable = s.name in reachable_states
 
 
 def attrs_control_locals(hlir):
@@ -1255,6 +1250,7 @@ def default_attr_funs(p4_filename, p4_version):
         attrs_resolve_members,
         attrs_resolve_types,
 
+        attrs_fix_enum_error_pars,
         attrs_member_naming,
 
         attrs_add_enum_sizes,
