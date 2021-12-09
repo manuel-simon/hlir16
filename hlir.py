@@ -74,7 +74,7 @@ def walk_json_from_top(node, fun=p4node_creator):
     return hlir
 
 
-def p4_to_json(p4_filename, json_filename=None, p4_version=16, p4c_path=None, opts=[]):
+def p4_to_json(p4_filename, json_filename=None, p4_version=16, p4c_path=None, opts=[], p4_include_dirs=[]):
     filename, ext = os.path.splitext(p4_filename)
 
     if json_filename is None:
@@ -94,11 +94,13 @@ def p4_to_json(p4_filename, json_filename=None, p4_version=16, p4c_path=None, op
     p4test = os.path.join(p4c_path, "build", "p4test")
     p4include = os.path.join(p4c_path, "p4include")
 
-    version_opts = ['--p4v', f'{p4_version}'] if p4_version is not None else []
+    cmd_opts = ['--p4v', f'{p4_version}'] if p4_version is not None else []
     for opt in opts:
-        version_opts += ['-D', opt]
+        cmd_opts += ['-D', opt]
+    for dir in p4_include_dirs:
+        cmd_opts += ['-I', dir]
 
     base_cmd = f'{p4test} {p4_filename} --toJSON {json_filename} --Wdisable=unused'.split(' ')
-    errcode = subprocess.call(base_cmd + version_opts)
+    errcode = subprocess.call(base_cmd + cmd_opts)
 
     return json_filename if errcode == 0 else None
