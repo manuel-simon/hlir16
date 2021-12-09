@@ -559,7 +559,7 @@ def attrs_hdr_metadata_insts(hlir):
     """Metadata instances and header instances"""
 
     is_hdr = lambda fld: fld.urtype.node_type == 'Type_Header'
-    is_named_hdr = lambda fld: fld.urtype.node_type == 'Type_Name' and resolve_type_name(hlir, fld.urtype).node_type == 'Type_Header'
+    is_named_hdr = lambda fld: fld.urtype.node_type == 'Type_Name' and (res := resolve_type_name(hlir, fld.urtype)) is not None and res.node_type == 'Type_Header'
 
     for stk in hlir.header_stacks:
         # note: the 'size' attribute in T4P4S refers to the bitsize of the header
