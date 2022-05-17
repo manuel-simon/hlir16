@@ -63,15 +63,28 @@ def attrs_annotations(hlir):
             hlir.sc_annotations.append(annot)
 
 
-def resolve_type_var(hlir, type_var):
+def resolve_type_var(hlir, type_var, node=None):
     varname = type_var.name
 
-    if (parents := type_var.parents.filter('node_type', ('Type_Method'))) != []:
+    if node is not None and len(parents2 := node.parents.filter('node_type', ('MethodCallExpression'))) > 0:
+        method = type_var.parents.filter('node_type', ('Type_Method', 'Type_Extern'))[-1]
+        mcall = parents2[0]
+
+        pars = method.typeParameters.parameters
+        args = mcall.typeArguments
+
+        par_to_typearg = {par: arg for par, arg in zip(pars, args)}
+        par = pars.get(varname)
+
+        if (result := par_to_typearg.get(par)) is not None:
+            return result.urtype
+
+    if len(parents := type_var.parents.filter('node_type', ('Type_Method'))) > 0:
         results = list(partype for parent in parents for parname, partype in zip(parent.typeParameters.parameters.map('name'), parent.parameters.parameters) if parname == varname)
-        if len(results) > 0:
+        if len(results) > 0 and results[0] != type_var:
             return results[0]
 
-    if (parents := type_var.parents.filter('node_type', ('Type_Extern', 'Type_Parser'))) != []:
+    if len(parents := type_var.parents.filter('node_type', ('Type_Extern', 'Type_Parser'))) > 0:
         typeargs = parents.filter(lambda n: 'typeargs' in n and varname in n.typeargs).map('typeargs')
         if len(typeargs) > 0:
             return typeargs[0][varname]
@@ -235,7 +248,7 @@ def attrs_resolve_types(hlir):
 
     for node in hlir.all_nodes.by_type('Parameter').filter('type.node_type', 'Type_Var'):
         nt = node.type
-        if (ref := resolve_type_var(hlir, nt)):
+        if (ref := resolve_type_var(hlir, nt, node)):
             nt.type_ref = ref
 
     for spcan in hlir.groups.pathexprs.specialized_canonical:
