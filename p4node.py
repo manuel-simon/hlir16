@@ -19,6 +19,7 @@ if pkgutil.find_loader('colored'):
     clr_count = fg('red')
     clr_nodeid = fg('magenta')
     clr_nodetype = fg('cyan')
+    clr_hex = fg('cyan')
     clr_value = fg('yellow')
     clr_extrapath = fg('magenta_2a')
     clr_off = fg('light_gray') + bg('dark_blue')
@@ -29,6 +30,7 @@ else:
     clr_count = None
     clr_nodeid = None
     clr_nodetype = None
+    clr_hex = None
     clr_value = None
     clr_extrapath = None
     clr_off = None
@@ -681,6 +683,12 @@ class P4Node(object):
                 return ("#", attrlen, clr_count if attrlen > 0 else clr_off)
 
             if type(attr) is not P4Node:
+                if type(attr) is int and (value := int(attr)) > 0xFF:
+                    if (typeattr := self.get_attr('type')) is not None and (sizeattr := typeattr.get_attr('size')) is not None:
+                        hextxt = _c(f'0x{value:0{sizeattr//4}x}', clr_hex)
+                    else:
+                        hextxt = _c(f'0x{value:08x}', clr_hex)
+                    return ("=", f'{attr}' or '""', clr_value, f'={hextxt}')
                 return ("=", f'{attr}' or '""', clr_value)
 
             result = follow_paths(d, attr)
@@ -705,7 +713,7 @@ class P4Node(object):
             conds = [det[0:2] == (part, 0) for part in parts] + [det[0] == part for part in parts] + [True]
             return -list(dropwhile(lambda x: not x[1], enumerate(conds)))[0][0]
 
-        return [_c(d, clr_attrname if attr_details[2] != clr_off else clr_off, show_colours) + attr_details[0] + _c(attr_details[1], attr_details[2], show_colours)
+        return [_c(d, clr_attrname if attr_details[2] != clr_off else clr_off, show_colours) + attr_details[0] + _c(attr_details[1], attr_details[2], show_colours) + ''.join(txt for txt in attr_details[3:])
                     for d, attr_details in sorted(((d, get_details(d)) for d in short_attrs()),
                                                   key = condfun)]
 
