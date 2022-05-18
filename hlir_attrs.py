@@ -571,8 +571,10 @@ def hlir_locals(hlir):
 def attrs_hdr_metadata_insts(hlir):
     """Metadata instances and header instances"""
 
-    is_hdr = lambda fld: fld.urtype.node_type == 'Type_Header'
-    is_named_hdr = lambda fld: fld.urtype.node_type == 'Type_Name' and (res := resolve_type_name(hlir, fld.urtype)) is not None and res.node_type == 'Type_Header'
+    def is_hdr(fld):
+        return fld.urtype.node_type == 'Type_Header'
+    def is_named_hdr(fld):
+        return fld.urtype.node_type == 'Type_Name' and (res := resolve_type_name(hlir, fld.urtype)) is not None and res.node_type == 'Type_Header'
 
     for stk in hlir.header_stacks:
         # note: the 'size' attribute in T4P4S refers to the bitsize of the header
@@ -582,7 +584,8 @@ def attrs_hdr_metadata_insts(hlir):
 
     stack_infos = hlir.header_stacks.map(lambda stack: (stack, stack.name, stack.urtype.stk_size.value, stack.urtype.elementType))
 
-    hdrs = hlir.news.data.flatmap('fields').filter(lambda fld: is_hdr(fld) or is_named_hdr(fld))
+    hdr_names = unique_everseen(hlir.groups.pathexprs.under_header.flatmap('type.fields').map('name'))
+    hdrs = hlir.news.data.flatmap('fields').filter(lambda fld: is_hdr(fld) or is_named_hdr(fld) and fld.name in hdr_names)
     hdr_stacks = list(create_hdr(hlir, f'{name}_{idx}', type, idx=idx, stack=stack) for (stack, name, stk_size, type) in stack_infos for idx in range(stk_size))
     local_hdrs = hlir.locals \
         .filter('node_type', 'Declaration_Variable') \
