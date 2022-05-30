@@ -538,7 +538,13 @@ class P4Node(object):
         return { nodename: repr } if is_top_level else repr
 
     def remove_attr(self, key):
-        del self.__dict__[key]
+        if self.is_vec():
+            if isinstance(self.vec, list):
+                self.vec.remove(key)
+            else:
+                self.vec.remove_attr(key)
+        else:
+            del self.__dict__[key]
 
     def set_attr(self, key, value):
         """Sets an attribute of the object."""

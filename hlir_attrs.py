@@ -318,7 +318,7 @@ def attrs_resolve_pathexprs(hlir):
         pe.decl_ref = locs.get(pe.path.name)
         if pe.decl_ref is None:
             if len(pars := locs.flatmap('parameters.parameters')) > 0:
-                parname, parsize = unique_everseen(((par.name, par.urtype.size) for par in pars))[0]
+                parname, parsize = list(filter(lambda par: par[0] == pe.path.name, unique_everseen(((par.name, par.urtype.size) for par in pars))))[0]
                 pe.decl_ref = pars.filter(lambda par: (par.name, par.urtype.size) == (parname, parsize))[0]
 
     for pe in hlir.groups.pathexprs.under_unknown:
@@ -696,10 +696,16 @@ def set_table_match_type(table):
     table.matchType.lpm = counter['lpm']
     table.matchType.exact = counter['exact']
 
-    if counter['ternary']  > 1: table.matchType.name = 'ternary'
-    if counter['lpm']      > 1: table.matchType.name = 'ternary'
-    if counter['lpm']     == 1: table.matchType.name = 'lpm'
-    if counter['lpm']     == 0: table.matchType.name = 'exact'
+    if counter['ternary']   > 1: table.matchType.name = 'ternary'
+    if counter['lpm']       > 1: table.matchType.name = 'ternary'
+    if counter['lpm']       == 1: table.matchType.name = 'lpm'
+    if counter['lpm']       == 0:
+        if table.store == 'static':
+            table.matchType.name = 'exact_inplace'
+        else:
+            table.matchType.name = 'exact'
+
+    table.match_type_code = table.matchType.name.split('_')[0]
 
 
 # note: Python 3.9 has this as a built-in
@@ -745,6 +751,8 @@ def attrs_controls_tables(hlir):
         for table in ctl.tables:
             table.control = ctl
         ctl.actions = P4Node(ctl.controlLocals['P4Action'])
+        for action in ctl.actions:
+            action.has_write_table_parameter = has_action_writable_parameter(action)
 
     hlir.tables = P4Node([table for ctrl in hlir.controls for table in ctrl.tables])
 
@@ -779,12 +787,38 @@ def attrs_controls_tables(hlir):
             table.key.keyElements = P4Node([])
 
     for table in hlir.tables:
-        set_table_match_type(table)
         set_table_key_attrs(hlir, table)
 
     for table in hlir.tables:
         table.key_length_bits = table_key_length(hlir, table)
-        table.key_length_bytes = (table.key_length_bits+7) // 8
+        table.key_length_bytes = (table.key_length_bits + 7) // 8
+        table.table_size = table.size.expression.value if 'size' in table and 'expression' in table.size else 512
+
+    for table in hlir.tables:
+        table.synced = False
+        table.impl = "t4p4s"  # default: t4p4s lockfree double buffering mechanism
+        table.store = "dynamic"
+        for annotation in table.annotations.annotations:
+            if annotation.name == "tableconfig":
+                for kv in annotation.kv:
+                    if kv.name == "synced":
+                        table.synced = kv.expression.value
+                    if kv.name == "impl":
+                        table.impl = kv.expression.value
+                    if kv.name == "store":
+                        table.store = kv.expression.value
+
+        set_table_match_type(table)
+        table.used_writable = any(map(lambda a: a.action_object.has_write_table_parameter, table.actions))
+
+
+def has_action_writable_parameter(action):
+    for parameter in action.parameters.parameters:
+        for annotation in parameter.annotations.annotations:
+            if annotation.name == "__ref":
+                return True
+
+    return False
 
 
 def attrs_extract_node(hlir, node, method):
